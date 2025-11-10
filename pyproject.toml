@@ -1,0 +1,23 @@
+[project]
+name = "tapservice"
+version = "0.1.0"
+description = "FastAPI gateway exposing NFC reader operations via HTTP commands with real-time WebSocket events."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.121.1",
+    "websockets>=15.0.1",
+    "pydantic-settings>=2.5.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28.1",
+    "pytest-asyncio>=1.3.0",
+    "pytest>=9.0.0",
+    "uvicorn>=0.38.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

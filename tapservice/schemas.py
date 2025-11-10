@@ -1,21 +1,254 @@
 from pydantic import BaseModel, Field
 from typing import Optional
-from .enums import FlowStatus
 
-# Schemas for NFC tag registration
-class TagRegistrationRequest(BaseModel):
-    """Request schema for registering a tag."""
+# ============================================================================
+# HTTP COMMAND SCHEMAS (Request/Response for short-lived actions)
+# ============================================================================
+
+# --- Registration Command ---
+class RegisterRequest(BaseModel):
+    """HTTP POST request to start tag registration."""
+    device_id: str = Field(..., description="Device ID to use for writing")
+    tag_uid: str = Field(..., description="Tag UID to register")
+    key: str = Field(..., description="Encryption key to write to tag")
+
+
+class RegisterResponse(BaseModel):
+    """HTTP response after initiating registration."""
+    request_id: str = Field(..., description="Unique request ID for tracking this operation")
     device_id: str
-    tag_secret: str
+    status: str = Field(default="initiated", description="Command accepted")
+    message: str = Field(default="Registration started. Monitor events via WebSocket.")
 
 
-class TagRegistrationResponse(BaseModel):
-    """Response schema after successfully registering a tag."""
+# --- Authentication Command ---
+class AuthStartRequest(BaseModel):
+    """HTTP POST request to start authentication session."""
+    device_id: str = Field(..., description="Device ID to use for authentication")
+
+
+class AuthStartResponse(BaseModel):
+    """HTTP response with ephemeral request_id."""
+    request_id: str = Field(..., description="Unique session ID for this auth flow")
+    device_id: str
+    status: str = Field(default="initiated")
+    message: str = Field(default="Auth session created. Monitor events via WebSocket.")
+
+
+class AuthUserDataRequest(BaseModel):
+    """HTTP POST request to provide key and user data for verification."""
+    key: str = Field(..., description="Decryption key for tag verification")
+    user_data: Optional[dict] = Field(None, description="Optional user-provided data")
+
+
+class AuthUserDataResponse(BaseModel):
+    """HTTP response confirming receipt of user data."""
+    request_id: str
+    status: str = Field(default="processing")
+    message: str = Field(default="User data received. Verification in progress.")
+
+
+# --- Read Command ---
+class ReadRequest(BaseModel):
+    """HTTP POST request to trigger tag read."""
+    device_id: str = Field(..., description="Device ID to use for reading")
+
+
+class ReadResponse(BaseModel):
+    """HTTP response after initiating read."""
+    request_id: str = Field(..., description="Unique request ID for tracking this operation")
+    device_id: str
+    status: str = Field(default="initiated")
+    message: str = Field(default="Read started. Monitor events via WebSocket.")
+
+
+# --- Device Status Query ---
+class DeviceStatusResponse(BaseModel):
+    """HTTP GET response for device status."""
+    device_id: str
+    status: str = Field(..., description="online, offline, busy")
+    mode: str = Field(..., description="idle, auth, read, register")
+    last_seen: str = Field(..., description="ISO 8601 timestamp")
+
+
+# --- Device List Query ---
+class DeviceListResponse(BaseModel):
+    """HTTP GET response for listing all devices."""
+    devices: list[DeviceStatusResponse] = Field(..., description="List of all tracked devices")
+    total: int = Field(..., description="Total number of devices")
+    page: int = Field(..., description="Current page number (1-indexed)")
+    page_size: int = Field(..., description="Number of items per page")
+    total_pages: int = Field(..., description="Total number of pages")
+
+
+# --- Device Reset ---
+class ResetDeviceResponse(BaseModel):
+    """HTTP POST response for device reset."""
+    device_id: str
+    status: str = Field(default="reset")
+    message: str = Field(default="Device reset to idle state")
+
+
+# --- Cancellation ---
+class CancelResponse(BaseModel):
+    """HTTP response for cancellation request."""
+    request_id: str
+    status: str = Field(default="cancelled")
     message: str
-    tag_id: str
 
 
-# Error response schemas
+# --- Request Status Query (unified for all operations) ---
+class RequestStatusResponse(BaseModel):
+    """HTTP GET response for request status query."""
+    request_id: str = Field(..., description="The request ID being queried")
+    operation: str = Field(..., description="Operation type: auth, register, read")
+    device_id: str = Field(..., description="Device handling this operation")
+    status: str = Field(..., description="Current status: waiting, tag_detected, processing, completed, error, cancelled")
+    created_at: str = Field(..., description="ISO 8601 timestamp when request was created")
+    metadata: dict = Field(default_factory=dict, description="Operation-specific metadata")
+
+
+# --- Request List Query ---
+class RequestListResponse(BaseModel):
+    """HTTP GET response for listing all requests."""
+    requests: list[RequestStatusResponse] = Field(..., description="List of operation requests")
+    total: int = Field(..., description="Total number of requests")
+    page: int = Field(..., description="Current page number (1-indexed)")
+    page_size: int = Field(..., description="Number of items per page")
+    total_pages: int = Field(..., description="Total number of pages")
+
+
+# ============================================================================
+# WEBSOCKET EVENT SCHEMAS (Real-time event streaming)
+# ============================================================================
+
+# Base event structure
+class DeviceEvent(BaseModel):
+    """Base class for all device events."""
+    event_type: str = Field(..., description="Event type identifier")
+    device_id: str = Field(..., description="Device that generated the event")
+    timestamp: str = Field(..., description="ISO 8601 timestamp")
+
+
+# --- Status Events ---
+class StatusChangeEvent(DeviceEvent):
+    """Event when device status changes (online/offline/busy)."""
+    event_type: str = Field(default="status_change")
+    status: str = Field(..., description="online, offline, busy")
+
+
+class ModeChangeEvent(DeviceEvent):
+    """Event when device mode changes (idle/auth/read/register)."""
+    event_type: str = Field(default="mode_change")
+    mode: str = Field(..., description="idle, auth, read, register")
+    session_id: Optional[str] = Field(None, description="Associated session/request ID")
+
+
+# --- Registration Events ---
+class RegisterWaitingEvent(DeviceEvent):
+    """Device is waiting for tag to register."""
+    event_type: str = Field(default="register_waiting")
+    request_id: str = Field(..., description="Request ID for this registration operation")
+    message: str = Field(default="Present tag to writer")
+
+
+class RegisterWritingEvent(DeviceEvent):
+    """Device is writing data to tag."""
+    event_type: str = Field(default="register_writing")
+    tag_uid: str
+    message: str = Field(default="Writing data to tag...")
+
+
+class RegisterSuccessEvent(DeviceEvent):
+    """Tag registration completed successfully."""
+    event_type: str = Field(default="register_success")
+    tag_uid: str
+    message: str = Field(default="Tag registered successfully")
+
+
+class RegisterErrorEvent(DeviceEvent):
+    """Tag registration failed."""
+    event_type: str = Field(default="register_error")
+    error_code: str
+    message: str
+
+
+# --- Authentication Events ---
+class AuthWaitingEvent(DeviceEvent):
+    """Device is waiting for tag during auth."""
+    event_type: str = Field(default="auth_waiting")
+    request_id: str
+    message: str = Field(default="Present tag to reader")
+
+
+class AuthTagDetectedEvent(DeviceEvent):
+    """Tag detected during auth - client should provide user data."""
+    event_type: str = Field(default="auth_tag_detected")
+    request_id: str
+    tag_uid: str
+    message: str = Field(default="Tag detected. Awaiting user data.")
+
+
+class AuthProcessingEvent(DeviceEvent):
+    """Device is verifying authentication."""
+    event_type: str = Field(default="auth_processing")
+    request_id: str
+    message: str = Field(default="Verifying credentials...")
+
+
+class AuthSuccessEvent(DeviceEvent):
+    """Authentication succeeded."""
+    event_type: str = Field(default="auth_success")
+    request_id: str
+    tag_uid: str
+    authenticated: bool = Field(default=True)
+    message: str = Field(default="Authentication successful")
+
+
+class AuthFailedEvent(DeviceEvent):
+    """Authentication failed (invalid key)."""
+    event_type: str = Field(default="auth_failed")
+    request_id: str
+    tag_uid: Optional[str] = None
+    authenticated: bool = Field(default=False)
+    message: str = Field(default="Authentication failed")
+
+
+class AuthErrorEvent(DeviceEvent):
+    """Authentication encountered an error."""
+    event_type: str = Field(default="auth_error")
+    request_id: str
+    error_code: str
+    message: str
+
+
+# --- Read Events ---
+class ReadWaitingEvent(DeviceEvent):
+    """Device is waiting for tag to read."""
+    event_type: str = Field(default="read_waiting")
+    request_id: str = Field(..., description="Request ID for this read operation")
+    message: str = Field(default="Present tag to reader")
+
+
+class ReadSuccessEvent(DeviceEvent):
+    """Tag read completed successfully."""
+    event_type: str = Field(default="read_success")
+    tag_uid: str
+    data: Optional[dict] = Field(None, description="Tag data if available")
+    message: str = Field(default="Tag read successfully")
+
+
+class ReadErrorEvent(DeviceEvent):
+    """Tag read failed."""
+    event_type: str = Field(default="read_error")
+    error_code: str
+    message: str
+
+
+# ============================================================================
+# ERROR RESPONSE SCHEMAS (for HTTP endpoints)
+# ============================================================================
+
 class ErrorDetail(BaseModel):
     """Detailed error information."""
     code: str = Field(..., description="Error code for programmatic handling")
@@ -28,7 +261,6 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
-# Specific error types for NFC operations
 class NFCError(BaseModel):
     """Error response for NFC-related operations."""
     error_code: str = Field(..., description="Specific NFC error code")
@@ -36,107 +268,3 @@ class NFCError(BaseModel):
     tag_id: Optional[str] = Field(None, description="Tag ID if available")
     retry_possible: bool = Field(True, description="Whether the operation can be retried")
 
-
-# WebSocket message schemas for device registration
-class DeviceStatusMessage(BaseModel):
-    """Message sent via WebSocket when device status changes."""
-    event_type: str = Field(..., description="Type of event: 'online' or 'offline'")
-    device_id: str = Field(..., description="Unique identifier for the device")
-    timestamp: str = Field(..., description="ISO 8601 timestamp of the event")
-    message: Optional[str] = Field(None, description="Additional message from device")
-
-
-# WebSocket message schemas for authentication flow
-class AuthInitMessage(BaseModel):
-    """Initial message from client to start authentication."""
-    device_id: str = Field(..., description="Device ID to authenticate with")
-
-
-class AuthWaitingMessage(BaseModel):
-    """Server response indicating waiting for tag."""
-    status: FlowStatus = Field(default=FlowStatus.waiting_for_tag, description="Current status")
-    message: str = Field(..., description="User-facing message")
-
-
-class AuthTagDetectedMessage(BaseModel):
-    """Server message when tag is detected."""
-    status: FlowStatus = Field(default=FlowStatus.tag_detected, description="Current status")
-    tag_id: str = Field(..., description="Detected tag ID")
-
-
-class AuthKeyMessage(BaseModel):
-    """Client message providing decryption key."""
-    key: str = Field(..., description="Decryption key for tag verification")
-
-
-class AuthResultMessage(BaseModel):
-    """Final authentication result from server."""
-    status: FlowStatus = Field(..., description="Result status: FlowStatus.success or FlowStatus.failed")
-    authenticated: bool = Field(..., description="Whether authentication succeeded")
-    message: str = Field(..., description="Result message")
-
-
-class AuthErrorMessage(BaseModel):
-    """Error message during authentication."""
-    status: FlowStatus = Field(default=FlowStatus.error, description="Status indicating error")
-    code: str = Field(..., description="Error code")
-    message: str = Field(..., description="Error message")
-
-
-# WebSocket message schemas for tag reading flow
-class ReadInitMessage(BaseModel):
-    """Initial message from client to start reading a tag."""
-    device_id: str = Field(..., description="Device ID to use for reading")
-
-
-class ReadWaitingMessage(BaseModel):
-    """Server response indicating waiting for tag."""
-    status: FlowStatus = Field(default=FlowStatus.waiting_for_tag, description="Current status")
-    message: str = Field(..., description="User-facing message")
-
-
-class ReadTagDetectedMessage(BaseModel):
-    """Server message when tag is detected and read."""
-    status: FlowStatus = Field(default=FlowStatus.tag_detected, description="Current status")
-    tag_id: str = Field(..., description="Detected tag ID")
-    message: str = Field(..., description="Success message")
-
-
-class ReadErrorMessage(BaseModel):
-    """Error message during tag reading."""
-    status: FlowStatus = Field(default=FlowStatus.error, description="Status indicating error")
-    code: str = Field(..., description="Error code")
-    message: str = Field(..., description="Error message")
-
-
-# WebSocket message schemas for tag registration/writing flow
-class RegisterInitMessage(BaseModel):
-    """Initial message from client to start registering/writing a tag."""
-    device_id: str = Field(..., description="Device ID to use for writing")
-    tag_secret: str = Field(..., description="Secret data to write to the tag")
-
-
-class RegisterWaitingMessage(BaseModel):
-    """Server response indicating waiting for tag to write."""
-    status: FlowStatus = Field(default=FlowStatus.waiting_for_tag, description="Current status")
-    message: str = Field(..., description="User-facing message")
-
-
-class RegisterWritingMessage(BaseModel):
-    """Server message when writing to tag."""
-    status: FlowStatus = Field(default=FlowStatus.writing, description="Current status")
-    message: str = Field(..., description="Status message")
-
-
-class RegisterSuccessMessage(BaseModel):
-    """Server message when tag is successfully written."""
-    status: FlowStatus = Field(default=FlowStatus.success, description="Current status")
-    tag_id: str = Field(..., description="Written tag ID")
-    message: str = Field(..., description="Success message")
-
-
-class RegisterErrorMessage(BaseModel):
-    """Error message during tag registration."""
-    status: FlowStatus = Field(default=FlowStatus.error, description="Status indicating error")
-    code: str = Field(..., description="Error code")
-    message: str = Field(..., description="Error message")

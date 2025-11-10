@@ -1,38 +1,55 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from typing import Set
-import asyncio
-from pydantic import ValidationError
+"""
+FastAPI routes implementing HTTP command endpoints and WebSocket event streaming.
+
+HTTP endpoints handle short-lived commands (POST /register, POST /auth/start, etc.)
+WebSocket endpoint (/events) streams real-time device events from all devices.
+"""
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query
+from datetime import datetime, UTC
 import logging
+import math
 
-from .enums import FlowStatus
-from .ws_helpers import receive_validated
-
+from .session_manager import get_session_manager, DeviceMode
 from .schemas import (
+    # HTTP schemas
+    RegisterRequest,
+    RegisterResponse,
+    AuthStartRequest,
+    AuthStartResponse,
+    AuthUserDataRequest,
+    AuthUserDataResponse,
+    ReadRequest,
+    ReadResponse,
+    DeviceStatusResponse,
+    DeviceListResponse,
+    ResetDeviceResponse,
+    RequestStatusResponse,
+    RequestListResponse,
+    CancelResponse,
     ErrorResponse,
     NFCError,
-    AuthInitMessage,
-    AuthWaitingMessage,
-    AuthTagDetectedMessage,
-    AuthKeyMessage,
-    AuthResultMessage,
-    AuthErrorMessage,
-    ReadInitMessage,
-    ReadWaitingMessage,
-    ReadTagDetectedMessage,
-    ReadErrorMessage,
-    RegisterInitMessage,
-    RegisterWaitingMessage,
-    RegisterWritingMessage,
-    RegisterSuccessMessage,
-    RegisterErrorMessage,
+    # WebSocket event schemas (imported for MQTT integration)
+    StatusChangeEvent,  # noqa: F401 - used in MQTT handlers
+    ModeChangeEvent,  # noqa: F401 - used in MQTT handlers
+    RegisterWaitingEvent,
+    RegisterWritingEvent,  # noqa: F401 - used in MQTT handlers
+    RegisterSuccessEvent,  # noqa: F401 - used in MQTT handlers
+    RegisterErrorEvent,  # noqa: F401 - used in MQTT handlers
+    AuthWaitingEvent,
+    AuthTagDetectedEvent,  # noqa: F401 - used in MQTT handlers
+    AuthProcessingEvent,
+    AuthSuccessEvent,  # noqa: F401 - used in MQTT handlers
+    AuthFailedEvent,  # noqa: F401 - used in MQTT handlers
+    AuthErrorEvent,  # noqa: F401 - used in MQTT handlers
+    ReadWaitingEvent,
+    ReadSuccessEvent,  # noqa: F401 - used in MQTT handlers
+    ReadErrorEvent,  # noqa: F401 - used in MQTT handlers
 )
 
 router = APIRouter()
+logger = logging.getLogger("tapservice")
 
-# Store active WebSocket connections
-active_connections: Set[WebSocket] = set()
-
-# Common error responses for all NFC device endpoints
+# Common error responses for NFC device endpoints
 COMMON_NFC_RESPONSES = {
     400: {"model": NFCError, "description": "NFC operation error (tag write failed, no tag present, etc.)"},
     404: {"model": ErrorResponse, "description": "NFC device not found"},
@@ -41,319 +58,519 @@ COMMON_NFC_RESPONSES = {
 }
 
 
-@router.websocket("/ws/register")
-async def register_tag_websocket(websocket: WebSocket):
+# ============================================================================
+# HTTP COMMAND ENDPOINTS
+# ============================================================================
+
+@router.post("/register", response_model=RegisterResponse, responses=COMMON_NFC_RESPONSES)
+async def register_tag(request: RegisterRequest):
     """
-    WebSocket endpoint for registering/writing data to NFC tags.
+    Start tag registration/writing process on an NFC device.
+    
+    API client sends device_id, tag_uid, and key. Service commands the NFC device to
+    enter write mode and responds immediately. Client monitors progress via
+    WebSocket /events.
     
     Flow:
-    1. Client → Server: RegisterInitMessage {"device_id": "device_123", "tag_secret": "secret_data"}
-    2. Server → Client: RegisterWaitingMessage {"status": "waiting_for_tag", "message": "..."}
-    3. Server → Client: RegisterWritingMessage {"status": "writing", "message": "..."} (optional)
-    4. Server → Client: RegisterSuccessMessage {"status": "success", "tag_id": "ABC123", "message": "..."}
-    
-    Error scenarios:
-    - RegisterErrorMessage {"status": "error", "code": "...", "message": "..."}
-    
-    This endpoint sets the device in write mode, waits for a tag to be presented,
-    writes the data, and returns the tag ID.
+    1. Client sends HTTP POST /register → returns {request_id: "...", status: "initiated"}
+    2. Client receives via WebSocket: register_waiting, register_writing, register_success/error
+    3. Client can poll GET /requests/{request_id}/status or cancel with POST /requests/{request_id}/cancel
     """
-    await websocket.accept()
+    session_mgr = get_session_manager()
     
-    try:
-        logger = logging.getLogger("tapservice.ws")
-        # Step 1: Receive and validate initial registration request from client
-        def reg_error_factory(code: str, ve: ValidationError):
-            return RegisterErrorMessage(code=code, message=str(ve))
-        register_init = await receive_validated(websocket, RegisterInitMessage, reg_error_factory)
-        device_id = register_init.device_id  # retained for future logic
-        _tag_secret = register_init.tag_secret  # placeholder until MQTT integration
-        logger.info("Register flow started", extra={"device_id": device_id})
-        
-        # TODO: Validate device exists and is available
-        # if not device_available:
-        #     error_msg = RegisterErrorMessage(
-        #         code="DEVICE_NOT_FOUND",
-        #         message=f"Device {device_id} not found or unavailable"
-        #     )
-        #     await websocket.send_json(error_msg.model_dump())
-        #     await websocket.close(code=1008)
-        #     return
-        
-        # TODO: Publish to MQTT to set device in write mode
-        # mqtt_client.publish(f"devices/{device_id}/register/start", {"tag_secret": tag_secret})
-        
-        # Step 2: Send waiting status to client
-        waiting_msg = RegisterWaitingMessage(message="Present tag to writer")
-        await websocket.send_json(waiting_msg.model_dump())
-        
-        # TODO: Subscribe to MQTT topic for tag detection and write status
-        # Listen for: devices/{device_id}/register/tag_detected
-        # Listen for: devices/{device_id}/register/writing
-        # Listen for: devices/{device_id}/register/success
-        # For now, simulate the process
-        
-        # Simulate waiting for tag (replace with actual MQTT listener)
-        await asyncio.sleep(1)  # Placeholder for MQTT event
-        
-        # Step 3: Optional - Send writing status
-        writing_msg = RegisterWritingMessage(message="Writing data to tag...")
-        await websocket.send_json(writing_msg.model_dump())
-        
-        # Simulate write operation (replace with actual MQTT response)
-        await asyncio.sleep(1)  # Placeholder for write operation
-        written_tag_id = "PLACEHOLDER_TAG_ID"  # This would come from MQTT
-        
-        # TODO: Handle write failure scenarios:
-        # if write_failed:
-        #     error_msg = RegisterErrorMessage(
-        #         code="TAG_WRITE_FAILED",
-        #         message="Failed to write data to NFC tag"
-        #     )
-        #     await websocket.send_json(error_msg.model_dump())
-        #     await websocket.close(code=1011)
-        #     return
-        
-        # Step 4: Send success message
-        success_msg = RegisterSuccessMessage(tag_id=written_tag_id, message="Tag registered successfully")
-        await websocket.send_json(success_msg.model_dump())
-        
-        # Close connection after successful registration
-        await websocket.close(code=1000)
-        
-    except WebSocketDisconnect:
-        logger.info("Register WebSocket client disconnected")
-        # TODO: Cleanup - cancel write mode on device via MQTT
-        # mqtt_client.publish(f"devices/{device_id}/register/cancel", {})
-    except Exception as e:
-        logger.error("Register WebSocket error", exc_info=True)
-        try:
-            error_msg = RegisterErrorMessage(
-                code="INTERNAL_ERROR",
-                message=str(e)
-            )
-            await websocket.send_json(error_msg.model_dump())
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+    # Check if device exists and is available
+    if not session_mgr.get_device_state(request.device_id):
+        raise HTTPException(status_code=404, detail=f"Device {request.device_id} not found")
+    
+    if not session_mgr.is_device_available(request.device_id):
+        raise HTTPException(status_code=503, detail=f"Device {request.device_id} is busy")
+    
+    # Create operation session
+    request_id = session_mgr.create_operation_session(request.device_id, "register")
+    
+    # Store operation-specific metadata
+    session_mgr.update_operation_session(request_id, tag_uid=request.tag_uid, key=request.key)
+    
+    # TODO: Publish to MQTT: devices/{device_id}/register/start
+    # Payload: {"request_id": request_id, "tag_uid": tag_uid, "key": key}
+    # MQTT handler will call update_device_mode() when device confirms mode change
+    
+    # Send initial event via WebSocket
+    event = RegisterWaitingEvent(
+        device_id=request.device_id,
+        timestamp=datetime.now(tz=UTC).isoformat(),
+        request_id=request_id,
+        message="Present tag to writer"
+    )
+    await session_mgr.publish_event(request.device_id, event.model_dump())
+    
+    logger.info("Registration initiated", extra={
+        "device_id": request.device_id, 
+        "request_id": request_id,
+        "tag_uid": request.tag_uid
+    })
+    
+    return RegisterResponse(request_id=request_id, device_id=request.device_id)
 
 
-@router.websocket("/ws/auth")
-async def authenticate_tag_websocket(websocket: WebSocket):
+@router.post("/auth/start", response_model=AuthStartResponse, responses=COMMON_NFC_RESPONSES)
+async def auth_start(request: AuthStartRequest):
     """
-    WebSocket endpoint for interactive tag authentication with Pydantic validation.
+    Start authentication session on an NFC device.
     
-    Message Schemas (validated with Pydantic):
-    1. Client → Server: AuthInitMessage {"device_id": "device_123"}
-    2. Server → Client: AuthWaitingMessage {"status": "waiting_for_tag", "message": "..."}
-    3. Server → Client: AuthTagDetectedMessage {"status": "tag_detected", "tag_id": "ABC123"}
-    4. Client → Server: AuthKeyMessage {"key": "decryption_key_here"}
-    5. Server → Client: AuthResultMessage {"status": "success"/"failed", "authenticated": true/false, "message": "..."}
-    
-    Error scenarios:
-    - AuthErrorMessage {"status": "error", "code": "...", "message": "..."}
-    """
-    await websocket.accept()
-    
-    try:
-        logger = logging.getLogger("tapservice.ws")
-        def auth_error_factory(code: str, ve: ValidationError):
-            return AuthErrorMessage(code=code, message=str(ve))
-        auth_init = await receive_validated(websocket, AuthInitMessage, auth_error_factory)
-        device_id = auth_init.device_id  # retained for future logic
-        logger.info("Auth flow started", extra={"device_id": device_id})
-        
-        # TODO: Publish to MQTT to set device in auth mode
-        # mqtt_client.publish(f"devices/{device_id}/auth/start", payload)
-        
-        # Step 2: Send validated waiting status to client
-        waiting_msg = AuthWaitingMessage(message="Present tag to reader")
-        await websocket.send_json(waiting_msg.model_dump())
-        
-        # TODO: Subscribe to MQTT topic for tag detection
-        # Listen for: devices/{device_id}/auth/tag_detected
-        # For now, simulate waiting for tag detection
-        
-        # Simulate tag detection (replace with actual MQTT listener)
-        await asyncio.sleep(1)  # Placeholder for MQTT event
-        detected_tag_id = "PLACEHOLDER_TAG_ID"  # This would come from MQTT
-        
-        # Step 3: Send validated tag_detected message to client
-        tag_detected_msg = AuthTagDetectedMessage(tag_id=detected_tag_id)
-        await websocket.send_json(tag_detected_msg.model_dump())
-        
-        # Step 4: Receive and validate decryption key from client
-        def auth_key_error_factory(code: str, ve: ValidationError):
-            return AuthErrorMessage(code=code, message=str(ve))
-        auth_key = await receive_validated(websocket, AuthKeyMessage, auth_key_error_factory)
-        _decryption_key = auth_key.key  # placeholder until MQTT integration
-        
-        # TODO: Publish key to MQTT for device to verify
-        # mqtt_client.publish(f"devices/{device_id}/auth/verify", {"key": decryption_key})
-        
-        # TODO: Wait for verification result from MQTT
-        # Listen for: devices/{device_id}/auth/result
-        
-        # Simulate verification (replace with actual MQTT response)
-        await asyncio.sleep(1)  # Placeholder for MQTT verification
-        authenticated = True  # This would come from MQTT
-        
-        # Step 5: Send validated final result to client
-        if authenticated:
-            result_msg = AuthResultMessage(
-                status=FlowStatus.success,
-                authenticated=True,
-                message="Tag authenticated successfully"
-            )
-        else:
-            result_msg = AuthResultMessage(
-                status=FlowStatus.failed,
-                authenticated=False,
-                message="Authentication failed - invalid key or tag"
-            )
-        
-        await websocket.send_json(result_msg.model_dump())
-        
-        # Close connection after authentication complete
-        await websocket.close(code=1000)
-        
-    except WebSocketDisconnect:
-        logger.info("Auth WebSocket client disconnected")
-        # TODO: Cleanup - cancel any pending MQTT operations
-    except Exception as e:
-        logger.error("Auth WebSocket error", exc_info=True)
-        try:
-            error_msg = AuthErrorMessage(
-                code="INTERNAL_ERROR",
-                message=str(e)
-            )
-            await websocket.send_json(error_msg.model_dump())
-            await websocket.close(code=1011)
-        except Exception:
-            pass
-
-
-@router.websocket("/ws/read")
-async def read_tag_websocket(websocket: WebSocket):
-    """
-    WebSocket endpoint for reading NFC tag IDs.
+    Creates ephemeral request_id and sets NFC device in auth mode. API client uses
+    request_id to correlate WebSocket events and provide user data.
     
     Flow:
-    1. Client → Server: ReadInitMessage {"device_id": "device_123"}
-    2. Server → Client: ReadWaitingMessage {"status": "waiting_for_tag", "message": "..."}
-    3. Server → Client: ReadTagDetectedMessage {"status": "tag_detected", "tag_id": "ABC123", "message": "..."}
-    
-    Error scenarios:
-    - ReadErrorMessage {"status": "error", "code": "...", "message": "..."}
-    
-    This endpoint sets the device in read mode and waits for a tag to be presented.
-    Once a tag is detected, it returns the tag ID and closes the connection.
+    1. Client sends HTTP POST /auth/start → returns {request_id: "..."}
+    2. Client receives via WebSocket /events: auth_waiting, auth_tag_detected
+    3. Client sends HTTP POST /auth/{request_id}/user_data → provide key
+    4. Client receives via WebSocket /events: auth_processing, auth_success/failed/error
     """
-    await websocket.accept()
+    session_mgr = get_session_manager()
     
-    try:
-        logger = logging.getLogger("tapservice.ws")
-        def read_error_factory(code: str, ve: ValidationError):
-            return ReadErrorMessage(code=code, message=str(ve))
-        read_init = await receive_validated(websocket, ReadInitMessage, read_error_factory)
-        device_id = read_init.device_id  # retained for future logic
-        logger.info("Read flow started", extra={"device_id": device_id})
-        
-        # TODO: Publish to MQTT to set device in read mode
-        # mqtt_client.publish(f"devices/{device_id}/read/start", payload)
-        
-        # TODO: Check if device exists and is available
-        # if not device_available:
-        #     error_msg = ReadErrorMessage(
-        #         code="DEVICE_NOT_FOUND",
-        #         message=f"Device {device_id} not found or unavailable"
-        #     )
-        #     await websocket.send_json(error_msg.model_dump())
-        #     await websocket.close(code=1008)
-        #     return
-        
-        # Step 2: Send waiting status to client
-        waiting_msg = ReadWaitingMessage(message="Present tag to reader")
-        await websocket.send_json(waiting_msg.model_dump())
-        
-        # TODO: Subscribe to MQTT topic for tag detection
-        # Listen for: devices/{device_id}/read/tag_detected
-        # For now, simulate waiting for tag detection
-        
-        # Simulate tag detection (replace with actual MQTT listener)
-        await asyncio.sleep(2)  # Placeholder for MQTT event
-        detected_tag_id = "PLACEHOLDER_TAG_ID"  # This would come from MQTT
-        
-        # Step 3: Send tag_detected message to client
-        tag_detected_msg = ReadTagDetectedMessage(tag_id=detected_tag_id, message="Tag read successfully")
-        await websocket.send_json(tag_detected_msg.model_dump())
-        
-        # Close connection after tag is read
-        await websocket.close(code=1000)
-        
-    except WebSocketDisconnect:
-        logger.info("Read WebSocket client disconnected")
-        # TODO: Cleanup - cancel read mode on device via MQTT
-        # mqtt_client.publish(f"devices/{device_id}/read/cancel", {})
-    except Exception as e:
-        logger.error("Read WebSocket error", exc_info=True)
-        try:
-            error_msg = ReadErrorMessage(
-                code="INTERNAL_ERROR",
-                message=str(e)
+    # Check device availability
+    if not session_mgr.get_device_state(request.device_id):
+        raise HTTPException(status_code=404, detail=f"Device {request.device_id} not found")
+    
+    if not session_mgr.is_device_available(request.device_id):
+        raise HTTPException(status_code=503, detail=f"Device {request.device_id} is busy")
+    
+    # Create auth session
+    request_id = session_mgr.create_operation_session(request.device_id, "auth")
+    
+    # TODO: Publish to MQTT: devices/{device_id}/auth/start
+    # Payload: {"request_id": request_id}
+    # MQTT handler will call update_device_mode() when device confirms mode change
+    
+    # Send initial event via WebSocket
+    event = AuthWaitingEvent(
+        device_id=request.device_id,
+        timestamp=datetime.now(tz=UTC).isoformat(),
+        request_id=request_id,
+        message="Present tag to reader"
+    )
+    await session_mgr.publish_event(request.device_id, event.model_dump())
+    
+    logger.info("Auth session created", extra={"device_id": request.device_id, "request_id": request_id})
+    
+    return AuthStartResponse(request_id=request_id, device_id=request.device_id)
+
+
+@router.post("/auth/{request_id}/user_data", response_model=AuthUserDataResponse, responses=COMMON_NFC_RESPONSES)
+async def auth_user_data(request_id: str, request: AuthUserDataRequest):
+    """
+    Provide user credentials for authentication verification.
+    
+    Called after API client receives auth_tag_detected event. Service generates
+    challenge and verifies NFC device response. Result streamed via WebSocket.
+    
+    Flow:
+    1. Client receives via WebSocket /events: auth_tag_detected with tag_uid
+    2. Client sends HTTP POST /auth/{request_id}/user_data → provide key
+    3. Client receives via WebSocket /events: auth_processing, auth_success/failed
+    """
+    session_mgr = get_session_manager()
+    
+    # Retrieve auth session
+    session = session_mgr.get_operation_session(request_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Auth session {request_id} not found")
+    
+    if session.status != "tag_detected":
+        raise HTTPException(status_code=400, detail=f"Auth session not ready for user data (status: {session.status})")
+    
+    # Update session status
+    session_mgr.update_operation_session(request_id, status="processing")
+    
+    # TODO: Publish to MQTT: devices/{device_id}/auth/verify
+    # Payload: {"request_id": request_id, "key": key, "user_data": user_data}
+    
+    # Send processing event via WebSocket
+    event = AuthProcessingEvent(
+        device_id=session.device_id,
+        timestamp=datetime.now(tz=UTC).isoformat(),
+        request_id=request_id,
+        message="Verifying credentials..."
+    )
+    await session_mgr.publish_event(session.device_id, event.model_dump())
+    
+    logger.info("Auth user data received", extra={"request_id": request_id})
+    
+    return AuthUserDataResponse(request_id=request_id)
+
+
+@router.post("/read", response_model=ReadResponse, responses=COMMON_NFC_RESPONSES)
+async def read_tag(request: ReadRequest):
+    """
+    Trigger tag read operation on an NFC device.
+    
+    NFC device enters read mode and waits for tag. Result streamed via WebSocket.
+    
+    Flow:
+    1. Client sends HTTP POST /read → returns {request_id: "...", status: "initiated"}
+    2. Client receives via WebSocket /events: read_waiting, read_success/error
+    3. Client can poll GET /requests/{request_id}/status or cancel with POST /requests/{request_id}/cancel
+    """
+    session_mgr = get_session_manager()
+    
+    # Check device availability
+    if not session_mgr.get_device_state(request.device_id):
+        raise HTTPException(status_code=404, detail=f"Device {request.device_id} not found")
+    
+    if not session_mgr.is_device_available(request.device_id):
+        raise HTTPException(status_code=503, detail=f"Device {request.device_id} is busy")
+    
+    # Create operation session
+    request_id = session_mgr.create_operation_session(request.device_id, "read")
+    
+    # TODO: Publish to MQTT: devices/{device_id}/read/start
+    # Payload: {"request_id": request_id}
+    # MQTT handler will call update_device_mode() when device confirms mode change
+    
+    # Send initial event via WebSocket
+    event = ReadWaitingEvent(
+        device_id=request.device_id,
+        timestamp=datetime.now(tz=UTC).isoformat(),
+        request_id=request_id,
+        message="Present tag to reader"
+    )
+    await session_mgr.publish_event(request.device_id, event.model_dump())
+    
+    logger.info("Read operation initiated", extra={
+        "device_id": request.device_id,
+        "request_id": request_id
+    })
+    
+    return ReadResponse(request_id=request_id, device_id=request.device_id)
+
+
+@router.get("/device/{device_id}/status", response_model=DeviceStatusResponse, responses=COMMON_NFC_RESPONSES)
+async def get_device_status(device_id: str):
+    """
+    Get current NFC device status (one-time check).
+    
+    For continuous monitoring, API clients should connect to WebSocket /events
+    and filter events by device_id.
+    """
+    session_mgr = get_session_manager()
+    
+    device_state = session_mgr.get_device_state(device_id)
+    if not device_state:
+        raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+    
+    return DeviceStatusResponse(
+        device_id=device_id,
+        status=device_state.status.value,
+        mode=device_state.mode.value,
+        last_seen=device_state.last_seen.isoformat()
+    )
+
+
+@router.get("/devices", response_model=DeviceListResponse)
+async def list_devices(
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(20, ge=1, le=100, description="Number of items per page (max 100)")
+):
+    """
+    List all tracked NFC devices with their current status.
+    
+    Returns all devices that have been registered with the service,
+    including their online/offline status, current mode, and last seen time.
+    
+    Supports pagination with page and page_size query parameters.
+    """
+    session_mgr = get_session_manager()
+    
+    all_devices = session_mgr.list_devices()
+    total = len(all_devices)
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    
+    # Calculate pagination
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paginated_devices = all_devices[start_idx:end_idx]
+    
+    device_responses = [
+        DeviceStatusResponse(
+            device_id=device.device_id,
+            status=device.status.value,
+            mode=device.mode.value,
+            last_seen=device.last_seen.isoformat()
+        )
+        for device in paginated_devices
+    ]
+    
+    return DeviceListResponse(
+        devices=device_responses,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages
+    )
+
+
+@router.post("/device/{device_id}/reset", response_model=ResetDeviceResponse, responses=COMMON_NFC_RESPONSES)
+async def reset_device(device_id: str):
+    """
+    Request an NFC device reset to idle state.
+    
+    Sends reset command to device via MQTT. Device will confirm mode change
+    via event, which updates session manager state. Use this to recover from
+    stuck states or force-cancel operations.
+    
+    Note: Device mode update happens asynchronously when device confirms.
+    """
+    session_mgr = get_session_manager()
+    
+    device_state = session_mgr.get_device_state(device_id)
+    if not device_state:
+        raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+    
+    # If device has an active session, mark it for cancellation
+    if device_state.current_session_id:
+        session = session_mgr.get_operation_session(device_state.current_session_id)
+        if session:
+            session_mgr.cancel_operation_session(device_state.current_session_id)
+            logger.info(
+                f"Cancelled {session.operation} operation during device reset",
+                extra={"device_id": device_id, "request_id": device_state.current_session_id}
             )
-            await websocket.send_json(error_msg.model_dump())
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+    
+    # TODO: Publish to MQTT: devices/{device_id}/reset
+    # Payload: {"device_id": device_id}
+    # MQTT handler will call update_device_mode() when device confirms mode change to idle
+    
+    logger.info("Device reset command sent", extra={"device_id": device_id})
+    
+    return ResetDeviceResponse(device_id=device_id)
 
 
-@router.websocket("/ws/devices")
-async def device_registration_websocket(websocket: WebSocket):
+# ============================================================================
+# UNIFIED REQUEST MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@router.get("/requests", response_model=RequestListResponse)
+async def list_requests(
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(20, ge=1, le=100, description="Number of items per page (max 100)"),
+    device_id: str | None = Query(None, description="Filter by device ID"),
+    operation: str | None = Query(None, description="Filter by operation type (auth, register, read)"),
+    status: str | None = Query(None, description="Filter by status (waiting, processing, completed, error, cancelled)")
+):
     """
-    WebSocket endpoint for real-time device registration status.
+    List all operation requests with optional filtering and pagination.
     
-    Connects to MQTT and streams device online/offline events to connected clients.
+    Returns all tracked requests (auth, register, read operations) with their current status.
+    Supports filtering by device_id, operation type, and status.
+    """
+    session_mgr = get_session_manager()
     
-    Example message format:
-    {
-        "event_type": "online",  // or "offline"
-        "device_id": "device_123",
-        "timestamp": "2025-11-09T12:34:56.789Z",
-        "message": "Device connected"  // optional
-    }
+    all_sessions = session_mgr.list_operation_sessions()
+    
+    # Apply filters
+    filtered_sessions = all_sessions
+    if device_id:
+        filtered_sessions = [s for s in filtered_sessions if s.device_id == device_id]
+    if operation:
+        filtered_sessions = [s for s in filtered_sessions if s.operation == operation]
+    if status:
+        filtered_sessions = [s for s in filtered_sessions if s.status == status]
+    
+    # Sort by created_at descending (newest first)
+    filtered_sessions.sort(key=lambda s: s.created_at, reverse=True)
+    
+    total = len(filtered_sessions)
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    
+    # Calculate pagination
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paginated_sessions = filtered_sessions[start_idx:end_idx]
+    
+    request_responses = [
+        RequestStatusResponse(
+            request_id=session.request_id,
+            operation=session.operation,
+            device_id=session.device_id,
+            status=session.status,
+            created_at=session.created_at.isoformat(),
+            metadata=session.metadata
+        )
+        for session in paginated_sessions
+    ]
+    
+    return RequestListResponse(
+        requests=request_responses,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages
+    )
+
+
+@router.get("/requests/{request_id}/status", response_model=RequestStatusResponse, responses=COMMON_NFC_RESPONSES)
+async def get_request_status(request_id: str):
+    """
+    Get current status of any operation (auth, register, read) by request_id.
+    
+    This unified endpoint works for all async operations. Clients can poll this
+    endpoint or monitor real-time updates via WebSocket /events.
+    """
+    session_mgr = get_session_manager()
+    
+    session = session_mgr.get_operation_session(request_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+    
+    return RequestStatusResponse(
+        request_id=session.request_id,
+        operation=session.operation,
+        device_id=session.device_id,
+        status=session.status,
+        created_at=session.created_at.isoformat(),
+        metadata=session.metadata
+    )
+
+
+@router.post("/requests/{request_id}/cancel", response_model=CancelResponse, responses=COMMON_NFC_RESPONSES)
+async def cancel_request(request_id: str):
+    """
+    Request cancellation of any ongoing operation (auth, register, read).
+    
+    Sends cancel command to device via MQTT. Device will confirm mode change
+    via event, which updates session manager state.
+    
+    Note: Device mode update happens asynchronously when device confirms.
+    """
+    session_mgr = get_session_manager()
+    
+    session = session_mgr.get_operation_session(request_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+    
+    # Mark session as cancelled
+    session_mgr.cancel_operation_session(request_id)
+    
+    # TODO: Publish to MQTT: devices/{device_id}/{operation}/cancel
+    # Payload: {"request_id": request_id}
+    # MQTT handler will call update_device_mode() when device confirms mode change to idle
+    
+    logger.info(f"{session.operation.capitalize()} operation cancel requested", 
+                extra={"request_id": request_id, "operation": session.operation})
+    
+    return CancelResponse(
+        request_id=request_id, 
+        message=f"{session.operation.capitalize()} operation cancelled"
+    )
+
+
+# ============================================================================
+# WEBSOCKET EVENT STREAMING ENDPOINT
+# ============================================================================
+
+# Track active WebSocket connections (all devices)
+active_connections: list[WebSocket] = []
+
+
+@router.websocket("/events")
+async def device_events_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint for streaming NFC device events in real-time.
+    
+    Streams events from all NFC reader devices to all connected API clients.
+    
+    Event types:
+    - Device status changes (online/offline/busy)
+    - Device mode changes (idle/auth/read/register)
+    - Tag events (detected, read success/error)
+    - Registration events (waiting, writing, success/error)
+    - Authentication events (waiting, tag_detected, processing, success/failed/error)
+    - Read events (waiting, success/error)
+    
+    Events are JSON objects with event_type, device_id, timestamp, and event-specific fields.
+    
+    Usage:
+    1. API client connects to WebSocket
+    2. API client sends HTTP commands (POST /register, POST /auth/start, etc.) to control NFC devices
+    3. Service pushes NFC device events to WebSocket as they occur
+    4. API client filters events by device_id if only monitoring specific NFC readers
+    5. Connection stays open for continuous updates
     """
     await websocket.accept()
-    active_connections.add(websocket)
+    
+    # Register connection
+    active_connections.append(websocket)
+    
+    ws_logger = logging.getLogger("tapservice.ws")
+    ws_logger.info("WebSocket connected")
+    
+    session_mgr = get_session_manager()
     
     try:
-        # TODO: Implement MQTT subscription and message forwarding logic here.
-        while True:
-            # Keep the connection alive
-            await asyncio.sleep(10)
-                    
+        # Get global event queue
+        event_queue = session_mgr.get_event_queue()
+        
+        if event_queue:
+            # Stream events from queue
+            while True:
+                # Wait for events from MQTT or internal triggers
+                event = await event_queue.get()
+                
+                # Broadcast to all connections
+                await broadcast_to_all(event)
+                
     except WebSocketDisconnect:
-        logging.getLogger("tapservice.ws").info("Device status WebSocket client disconnected")
+        ws_logger.info("WebSocket disconnected")
     except Exception as e:
-        logging.getLogger("tapservice.ws").error("Device status WebSocket error", exc_info=True)
+        ws_logger.error("WebSocket error", exc_info=True)
         await websocket.close(code=1011, reason=str(e))
     finally:
-        active_connections.discard(websocket)
+        # Unregister connection
+        if websocket in active_connections:
+            active_connections.remove(websocket)
 
 
-async def broadcast_to_all(message: str):
-    """Broadcast a message to all connected WebSocket clients."""
-    disconnected = set()
+async def broadcast_to_all(event: dict):
+    """Broadcast an event to all WebSocket clients."""
+    disconnected = []
     
     for connection in active_connections:
         try:
-            await connection.send_text(message)
+            await connection.send_json(event)
         except Exception:
             # Mark connection for removal if send fails
-            disconnected.add(connection)
+            disconnected.append(connection)
     
     # Remove disconnected clients
     for connection in disconnected:
-        active_connections.discard(connection)
+        if connection in active_connections:
+            active_connections.remove(connection)
+
+
+# ============================================================================
+# MQTT EVENT HANDLERS (placeholder for future integration)
+# ============================================================================
+
+# TODO: Implement MQTT subscription handlers that receive device events
+# and publish them to WebSocket clients via session_mgr.publish_event()
+#
+# Example topics to subscribe to:
+# - devices/{device_id}/status → StatusChangeEvent
+# - devices/{device_id}/mode → ModeChangeEvent
+# - devices/{device_id}/register/waiting → RegisterWaitingEvent
+# - devices/{device_id}/register/writing → RegisterWritingEvent
+# - devices/{device_id}/register/success → RegisterSuccessEvent
+# - devices/{device_id}/register/error → RegisterErrorEvent
+# - devices/{device_id}/auth/waiting → AuthWaitingEvent
+# - devices/{device_id}/auth/tag_detected → AuthTagDetectedEvent
+# - devices/{device_id}/auth/processing → AuthProcessingEvent
+# - devices/{device_id}/auth/success → AuthSuccessEvent
+# - devices/{device_id}/auth/failed → AuthFailedEvent
+# - devices/{device_id}/auth/error → AuthErrorEvent
+# - devices/{device_id}/read/waiting → ReadWaitingEvent
+# - devices/{device_id}/read/success → ReadSuccessEvent
+# - devices/{device_id}/read/error → ReadErrorEvent
+
 
 

@@ -14,6 +14,9 @@ Operate NFC readers (register/write tags, authenticate, read) through a lightwei
 - In-memory state (easy dev / pluggable for Redis later)
 - Extensible operation model (add new operations with same pattern)
 
+See [MQTT Protocol Specification](https://github.com/LibreTap/mqtt-protocol) 
+for the communication contract between TapService and TapReader devices.
+
 ## Prerequisites
 
 - Python 3.12

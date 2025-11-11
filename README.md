@@ -14,6 +14,9 @@ Operate NFC readers (register/write tags, authenticate, read) through a lightwei
 - In-memory state (easy dev / pluggable for Redis later)
 - Extensible operation model (add new operations with same pattern)
 
+See [MQTT Protocol Specification](https://github.com/LibreTap/mqtt-protocol) 
+for the communication contract between TapService and TapReader devices.
+
 ## Prerequisites
 
 - Python 3.12
@@ -149,28 +152,96 @@ uv run pytest                                        # Run tests
 uv run pytest --cov=tapservice --cov-report=html    # With coverage
 ```
 
-**Structure**: `main.py` (app) · `routes.py` (endpoints) · `mqtt_handlers.py` (state updates) · `schemas.py` (models) · `session_manager.py` (state) · `settings.py` (config)
+**Structure**: `main.py` (app) · `routes.py` (endpoints) · `mqtt_client.py` (MQTT connection) · `mqtt_handlers.py` (state updates) · `schemas.py` (models) · `session_manager.py` (state) · `settings.py` (config)
 
 ## MQTT Integration
 
-**Command topics** (HTTP publishes):
+TapService uses `aiomqtt` to connect to an MQTT broker and communicate with NFC devices according to the [LibreTap MQTT Protocol Specification](https://github.com/LibreTap/mqtt-protocol).
+
+### Configuration
+
+Set environment variables to configure MQTT connection:
+
+```bash
+export TAPSERVICE_MQTT_HOST=localhost      # MQTT broker hostname
+export TAPSERVICE_MQTT_PORT=1883           # MQTT broker port
+export TAPSERVICE_MQTT_USERNAME=tapservice # Optional: MQTT username
+export TAPSERVICE_MQTT_PASSWORD=secret     # Optional: MQTT password
 ```
-devices/{device_id}/{operation}/start
+
+Or create a `.env` file (automatically loaded by pydantic-settings):
+```
+TAPSERVICE_MQTT_HOST=mqtt.example.com
+TAPSERVICE_MQTT_PORT=8883
+TAPSERVICE_MQTT_USERNAME=tapservice
+TAPSERVICE_MQTT_PASSWORD=your_password
+```
+
+### How It Works
+
+**Startup**: FastAPI lifespan manager connects to MQTT broker and subscribes to device topics using wildcards (`devices/+/status`, `devices/+/register/#`, etc.)
+
+**Command Flow**: HTTP endpoints → `mqtt_client.publish_command()` → MQTT broker → Device
+
+**Event Flow**: Device → MQTT broker → `mqtt_client` routes to handler in `mqtt_handlers.py` → Updates `session_manager` → Broadcasts to WebSocket clients
+
+**Command topics** (Service publishes):
+```
+devices/{device_id}/register/start
+devices/{device_id}/auth/start
+devices/{device_id}/auth/verify
+devices/{device_id}/read/start
 devices/{device_id}/{operation}/cancel
 devices/{device_id}/reset
 ```
 
-**Event topics** (Devices publish, handlers subscribe):
+**Event topics** (Devices publish, service subscribes):
 ```
-devices/{device_id}/status
-devices/{device_id}/mode              # Authoritative state updates
-devices/{device_id}/{operation}/*
+devices/{device_id}/status              # online/offline (retained)
+devices/{device_id}/mode                # idle/auth/read/register (retained)
+devices/{device_id}/register/*          # waiting/writing/success/error
+devices/{device_id}/auth/*              # waiting/tag_detected/processing/success/failed/error
+devices/{device_id}/read/*              # waiting/success/error
+devices/{device_id}/heartbeat           # periodic health metrics
 ```
 
-See `mqtt_handlers.py` for complete patterns. To integrate: add MQTT client → subscribe to event topics → route to handlers → publish commands from HTTP endpoints.
+### Message Format
+
+All MQTT messages use a standard envelope (v1.0):
+
+```json
+{
+  "version": "1.0",
+  "timestamp": "2025-11-11T12:00:00.000Z",
+  "device_id": "reader-001",
+  "event_type": "auth_success",
+  "request_id": "550e8400-e29b-41d4-a716-446655440002",
+  "payload": { /* operation-specific data */ }
+}
+```
+
+See the [MQTT Protocol Specification](mqtt-protocol/MQTT_PROTOCOL_SPEC.md) for complete details on message schemas, QoS levels, error codes, and flow diagrams.
+
+### Running with MQTT
+
+For local development, you can use Mosquitto:
+
+```bash
+# Install Mosquitto
+sudo apt install mosquitto mosquitto-clients  # Ubuntu/Debian
+brew install mosquitto                        # macOS
+
+# Start broker
+mosquitto -v
+
+# Run TapService (connects automatically on startup)
+uv run uvicorn tapservice.main:app --reload
+
+# Test with mosquitto_pub (simulate device)
+mosquitto_pub -t 'devices/test_reader/status' -m '{"version":"1.0","timestamp":"2025-11-11T12:00:00Z","device_id":"test_reader","event_type":"status_change","request_id":"test","payload":{"status":"online"}}'
+```
 
 ## Future
-- Complete MQTT client wiring
 - Operation timeouts
 - Redis-backed session manager
 - Auth/rate limiting

@@ -9,7 +9,8 @@ from datetime import datetime, UTC
 import logging
 import math
 
-from .session_manager import get_session_manager, DeviceMode
+from .session_manager import get_session_manager
+from .mqtt_client import get_mqtt_client
 from .schemas import (
     # HTTP schemas
     RegisterRequest,
@@ -91,9 +92,19 @@ async def register_tag(request: RegisterRequest):
     # Store operation-specific metadata
     session_mgr.update_operation_session(request_id, tag_uid=request.tag_uid, key=request.key)
     
-    # TODO: Publish to MQTT: devices/{device_id}/register/start
-    # Payload: {"request_id": request_id, "tag_uid": tag_uid, "key": key}
-    # MQTT handler will call update_device_mode() when device confirms mode change
+    # Publish command to device via MQTT
+    mqtt_client = get_mqtt_client()
+    await mqtt_client.publish_command(
+        device_id=request.device_id,
+        operation="register",
+        action="start",
+        request_id=request_id,
+        payload={
+            "tag_uid": request.tag_uid,
+            "key": request.key,
+            "timeout_seconds": 30  # Default timeout
+        }
+    )
     
     # Send initial event via WebSocket
     event = RegisterWaitingEvent(
@@ -139,9 +150,17 @@ async def auth_start(request: AuthStartRequest):
     # Create auth session
     request_id = session_mgr.create_operation_session(request.device_id, "auth")
     
-    # TODO: Publish to MQTT: devices/{device_id}/auth/start
-    # Payload: {"request_id": request_id}
-    # MQTT handler will call update_device_mode() when device confirms mode change
+    # Publish command to device via MQTT
+    mqtt_client = get_mqtt_client()
+    await mqtt_client.publish_command(
+        device_id=request.device_id,
+        operation="auth",
+        action="start",
+        request_id=request_id,
+        payload={
+            "timeout_seconds": 30  # Default timeout
+        }
+    )
     
     # Send initial event via WebSocket
     event = AuthWaitingEvent(
@@ -183,8 +202,19 @@ async def auth_user_data(request_id: str, request: AuthUserDataRequest):
     # Update session status
     session_mgr.update_operation_session(request_id, status="processing")
     
-    # TODO: Publish to MQTT: devices/{device_id}/auth/verify
-    # Payload: {"request_id": request_id, "key": key, "user_data": user_data}
+    # Publish command to device via MQTT
+    mqtt_client = get_mqtt_client()
+    await mqtt_client.publish_command(
+        device_id=session.device_id,
+        operation="auth",
+        action="verify",
+        request_id=request_id,
+        payload={
+            "tag_uid": session.metadata.get("tag_uid", ""),
+            "key": request.key,
+            "user_data": request.user_data
+        }
+    )
     
     # Send processing event via WebSocket
     event = AuthProcessingEvent(
@@ -224,9 +254,18 @@ async def read_tag(request: ReadRequest):
     # Create operation session
     request_id = session_mgr.create_operation_session(request.device_id, "read")
     
-    # TODO: Publish to MQTT: devices/{device_id}/read/start
-    # Payload: {"request_id": request_id}
-    # MQTT handler will call update_device_mode() when device confirms mode change
+    # Publish command to device via MQTT
+    mqtt_client = get_mqtt_client()
+    await mqtt_client.publish_command(
+        device_id=request.device_id,
+        operation="read",
+        action="start",
+        request_id=request_id,
+        payload={
+            "timeout_seconds": 30,  # Default timeout
+            "read_blocks": request.read_blocks if hasattr(request, 'read_blocks') else []
+        }
+    )
     
     # Send initial event via WebSocket
     event = ReadWaitingEvent(
@@ -337,9 +376,27 @@ async def reset_device(device_id: str):
                 extra={"device_id": device_id, "request_id": device_state.current_session_id}
             )
     
-    # TODO: Publish to MQTT: devices/{device_id}/reset
-    # Payload: {"device_id": device_id}
-    # MQTT handler will call update_device_mode() when device confirms mode change to idle
+    # Publish reset command to device via MQTT
+    # Reset uses special topic: devices/{device_id}/reset (not operation/action pattern)
+    import uuid
+    mqtt_client = get_mqtt_client()
+    
+    if mqtt_client.client:
+        reset_request_id = str(uuid.uuid4())
+        
+        # Build envelope directly for reset
+        envelope = {
+            "version": "1.0",
+            "timestamp": datetime.now(tz=UTC).isoformat(),
+            "device_id": device_id,
+            "event_type": "reset",
+            "request_id": reset_request_id,
+            "payload": {}
+        }
+        
+        import json
+        topic = f"devices/{device_id}/reset"
+        await mqtt_client.client.publish(topic, json.dumps(envelope), qos=1)
     
     logger.info("Device reset command sent", extra={"device_id": device_id})
     
@@ -452,9 +509,15 @@ async def cancel_request(request_id: str):
     # Mark session as cancelled
     session_mgr.cancel_operation_session(request_id)
     
-    # TODO: Publish to MQTT: devices/{device_id}/{operation}/cancel
-    # Payload: {"request_id": request_id}
-    # MQTT handler will call update_device_mode() when device confirms mode change to idle
+    # Publish cancel command to device via MQTT
+    mqtt_client = get_mqtt_client()
+    await mqtt_client.publish_command(
+        device_id=session.device_id,
+        operation=session.operation,
+        action="cancel",
+        request_id=request_id,
+        payload={}
+    )
     
     logger.info(f"{session.operation.capitalize()} operation cancel requested", 
                 extra={"request_id": request_id, "operation": session.operation})
@@ -546,31 +609,5 @@ async def broadcast_to_all(event: dict):
     for connection in disconnected:
         if connection in active_connections:
             active_connections.remove(connection)
-
-
-# ============================================================================
-# MQTT EVENT HANDLERS (placeholder for future integration)
-# ============================================================================
-
-# TODO: Implement MQTT subscription handlers that receive device events
-# and publish them to WebSocket clients via session_mgr.publish_event()
-#
-# Example topics to subscribe to:
-# - devices/{device_id}/status → StatusChangeEvent
-# - devices/{device_id}/mode → ModeChangeEvent
-# - devices/{device_id}/register/waiting → RegisterWaitingEvent
-# - devices/{device_id}/register/writing → RegisterWritingEvent
-# - devices/{device_id}/register/success → RegisterSuccessEvent
-# - devices/{device_id}/register/error → RegisterErrorEvent
-# - devices/{device_id}/auth/waiting → AuthWaitingEvent
-# - devices/{device_id}/auth/tag_detected → AuthTagDetectedEvent
-# - devices/{device_id}/auth/processing → AuthProcessingEvent
-# - devices/{device_id}/auth/success → AuthSuccessEvent
-# - devices/{device_id}/auth/failed → AuthFailedEvent
-# - devices/{device_id}/auth/error → AuthErrorEvent
-# - devices/{device_id}/read/waiting → ReadWaitingEvent
-# - devices/{device_id}/read/success → ReadSuccessEvent
-# - devices/{device_id}/read/error → ReadErrorEvent
-
 
 

@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.121.1",
     "websockets>=15.0.1",
     "pydantic-settings>=2.5.2",
+    "aiomqtt>=2.4.0",
 ]
 
 [project.optional-dependencies]

@@ -54,6 +54,11 @@ async def on_device_status_change(device_id: str, status: str):
     """
     session_mgr = get_session_manager()
     
+    # Auto-register device if it doesn't exist
+    if not session_mgr.get_device_state(device_id):
+        session_mgr.register_device(device_id)
+        logger.info(f"Auto-registered new device: {device_id}")
+    
     # Update device status based on actual device state
     device_status = DeviceStatus(status)
     session_mgr.update_device_status(device_id, device_status)
@@ -153,6 +158,8 @@ async def on_register_success(device_id: str, request_id: str, tag_uid: str):
     MQTT Topic: devices/{device_id}/register/success
     Payload: {"request_id": "...", "tag_uid": "...", "timestamp": "..."}
     """
+    logger.info("Processing register_success event", extra={"device_id": device_id, "request_id": request_id, "tag_uid": tag_uid})
+    
     session_mgr = get_session_manager()
     session_mgr.update_operation_session(request_id, status="completed", tag_uid=tag_uid)
     
@@ -163,6 +170,8 @@ async def on_register_success(device_id: str, request_id: str, tag_uid: str):
         tag_uid=tag_uid
     )
     await session_mgr.publish_event(device_id, event.model_dump())
+    
+    logger.info("Register operation completed successfully", extra={"device_id": device_id, "request_id": request_id})
 
 
 async def on_register_error(device_id: str, request_id: str, error: str, error_code: str):
@@ -209,6 +218,8 @@ async def on_auth_tag_detected(device_id: str, request_id: str, tag_uid: str):
     MQTT Topic: devices/{device_id}/auth/tag_detected
     Payload: {"request_id": "...", "tag_uid": "...", "timestamp": "..."}
     """
+    logger.info("Processing auth_tag_detected event", extra={"device_id": device_id, "request_id": request_id, "tag_uid": tag_uid})
+    
     session_mgr = get_session_manager()
     session_mgr.update_operation_session(request_id, status="tag_detected", tag_uid=tag_uid)
     
@@ -219,6 +230,8 @@ async def on_auth_tag_detected(device_id: str, request_id: str, tag_uid: str):
         tag_uid=tag_uid
     )
     await session_mgr.publish_event(device_id, event.model_dump())
+    
+    logger.info("Auth tag detected", extra={"device_id": device_id, "request_id": request_id})
 
 
 async def on_auth_processing(device_id: str, request_id: str, message: str):
@@ -243,6 +256,8 @@ async def on_auth_success(device_id: str, request_id: str, tag_uid: str, user_da
     MQTT Topic: devices/{device_id}/auth/success
     Payload: {"request_id": "...", "tag_uid": "...", "user_data": {...}, "timestamp": "..."}
     """
+    logger.info("Processing auth_success event", extra={"device_id": device_id, "request_id": request_id, "tag_uid": tag_uid})
+    
     session_mgr = get_session_manager()
     session_mgr.update_operation_session(request_id, status="completed", tag_uid=tag_uid, user_data=user_data)
     
@@ -254,6 +269,8 @@ async def on_auth_success(device_id: str, request_id: str, tag_uid: str, user_da
         user_data=user_data
     )
     await session_mgr.publish_event(device_id, event.model_dump())
+    
+    logger.info("Auth operation completed successfully", extra={"device_id": device_id, "request_id": request_id})
 
 
 async def on_auth_failed(device_id: str, request_id: str, reason: str):
@@ -346,39 +363,3 @@ async def on_read_error(device_id: str, request_id: str, error: str, error_code:
         error_code=error_code
     )
     await session_mgr.publish_event(device_id, event.model_dump())
-
-
-# ============================================================================
-# MQTT CLIENT SETUP (TODO)
-# ============================================================================
-
-# TODO: Initialize MQTT client and subscribe to topics
-# Example using aiomqtt or paho-mqtt:
-#
-# async def setup_mqtt_client():
-#     async with aiomqtt.Client("mqtt.broker.com") as client:
-#         # Subscribe to all device topics with wildcard
-#         await client.subscribe("devices/+/status")
-#         await client.subscribe("devices/+/mode")
-#         await client.subscribe("devices/+/register/#")
-#         await client.subscribe("devices/+/auth/#")
-#         await client.subscribe("devices/+/read/#")
-#         
-#         # Process incoming messages
-#         async for message in client.messages:
-#             await route_mqtt_message(message)
-#
-# async def route_mqtt_message(message):
-#     """Route MQTT message to appropriate handler based on topic."""
-#     topic_parts = message.topic.split("/")
-#     device_id = topic_parts[1]
-#     payload = json.loads(message.payload)
-#     
-#     if topic_parts[2] == "status":
-#         await on_device_status_change(device_id, payload["status"])
-#     elif topic_parts[2] == "mode":
-#         await on_device_mode_change(device_id, payload["mode"], payload.get("session_id"))
-#     elif topic_parts[2] == "register":
-#         if topic_parts[3] == "waiting":
-#             await on_register_waiting(device_id, payload["request_id"], payload["message"])
-#         # ... etc

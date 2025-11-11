@@ -30,6 +30,11 @@ def setup_logging() -> None:
                 "handlers": ["default"],
                 "level": "INFO",
                 "propagate": False
+            },
+            "tapservice.mqtt": {
+                "handlers": ["default"],
+                "level": "INFO",
+                "propagate": False
             }
         },
         "root": {

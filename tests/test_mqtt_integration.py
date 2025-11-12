@@ -15,6 +15,7 @@ import json
 import pytest
 import pytest_asyncio
 from datetime import datetime, UTC
+from uuid import uuid4
 
 from aiomqtt import Client as MQTTClient
 import httpx
@@ -123,8 +124,11 @@ def create_mqtt_envelope(device_id: str, event_type: str, request_id: str, paylo
     }
 
 
-async def publish_device_status(mqtt_client: MQTTClient, device_id: str, status: str, request_id: str = "test-status"):
+async def publish_device_status(mqtt_client: MQTTClient, device_id: str, status: str, request_id: str = None):
     """Publish device status change event."""
+    if request_id is None:
+        request_id = str(uuid4())
+    
     message = create_mqtt_envelope(
         device_id=device_id,
         event_type="status_change",
@@ -138,8 +142,13 @@ async def publish_device_status(mqtt_client: MQTTClient, device_id: str, status:
     await mqtt_client.publish(f"devices/{device_id}/status", json.dumps(message))
 
 
-async def publish_device_mode(mqtt_client: MQTTClient, device_id: str, mode: str, request_id: str, previous_mode: str = None):
+async def publish_device_mode(mqtt_client: MQTTClient, device_id: str, mode: str, request_id: str = None, previous_mode: str = None):
     """Publish device mode change event."""
+    if request_id is None:
+        request_id = str(uuid4())
+    if previous_mode is None:
+        previous_mode = "idle"
+    
     message = create_mqtt_envelope(
         device_id=device_id,
         event_type="mode_change",
@@ -225,7 +234,7 @@ class TestRegisterOperation:
         
         # 1. Bring device online
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-001")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start register operation via HTTP
@@ -253,7 +262,8 @@ class TestRegisterOperation:
             request_id=request_id,
             payload={
                 "tag_uid": tag_uid,
-                "blocks_written": 4
+                "blocks_written": 4,
+                "message": "Tag registered successfully"
             }
         )
         await mqtt_device_client.publish(
@@ -282,7 +292,7 @@ class TestRegisterOperation:
         
         # 1. Bring device online
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-002")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start register operation
@@ -306,8 +316,10 @@ class TestRegisterOperation:
             event_type="register_error",
             request_id=request_id,
             payload={
-                "error_code": "WRITE_FAILED",
-                "message": "Failed to write to tag"
+                "error": "Failed to write to tag",
+                "error_code": "NFC_WRITE_ERROR",
+                "retry_possible": True,
+                "component": "nfc"
             }
         )
         await mqtt_device_client.publish(
@@ -319,7 +331,7 @@ class TestRegisterOperation:
         # Verify session marked as error (handler uses "error" status)
         session = session_manager.get_operation_session(request_id)
         assert session.status == "error"
-        assert "WRITE_FAILED" in session.metadata.get("error_code", "")
+        assert session.metadata.get("error_code") == "NFC_WRITE_ERROR"
 
 
 @pytest.mark.asyncio
@@ -335,7 +347,7 @@ class TestAuthenticationFlow:
         
         # 1. Bring device online
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-003")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start auth session
@@ -352,7 +364,10 @@ class TestAuthenticationFlow:
             device_id=device_id,
             event_type="auth_tag_detected",
             request_id=request_id,
-            payload={"tag_uid": tag_uid}
+            payload={
+                "tag_uid": tag_uid,
+                "message": "Tag detected and ready for authentication"
+            }
         )
         await mqtt_device_client.publish(
             f"devices/{device_id}/auth/tag_detected",
@@ -382,6 +397,7 @@ class TestAuthenticationFlow:
             payload={
                 "tag_uid": tag_uid,
                 "authenticated": True,
+                "message": "Authentication successful",
                 "user_data": user_data
             }
         )
@@ -411,7 +427,7 @@ class TestAuthenticationFlow:
         
         # 1. Setup device
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-004")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start auth session
@@ -477,7 +493,7 @@ class TestReadOperation:
         
         # 1. Setup device
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-005")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start read operation
@@ -496,6 +512,7 @@ class TestReadOperation:
             request_id=request_id,
             payload={
                 "tag_uid": tag_uid,
+                "message": "Tag read successfully",
                 "data": tag_data
             }
         )
@@ -529,7 +546,7 @@ class TestOperationCancellation:
         
         # 1. Setup device
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-006")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start read operation
@@ -583,7 +600,7 @@ class TestDeviceAvailability:
         
         # 1. Setup device
         await publish_device_status(mqtt_device_client, device_id, "online")
-        await publish_device_mode(mqtt_device_client, device_id, "idle", "init-007")
+        await publish_device_mode(mqtt_device_client, device_id, "idle")
         await asyncio.sleep(0.2)
         
         # 2. Start first operation

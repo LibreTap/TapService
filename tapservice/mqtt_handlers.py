@@ -186,7 +186,7 @@ async def on_register_error(device_id: str, request_id: str, error: str, error_c
         device_id=device_id,
         timestamp=datetime.now(tz=UTC).isoformat(),
         request_id=request_id,
-        error=error,
+        message=error,
         error_code=error_code
     )
     await session_mgr.publish_event(device_id, event.model_dump())

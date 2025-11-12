@@ -1,0 +1,116 @@
+name: Validate MQTT Schema Compliance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Check for mqtt-protocol updates weekly (Mondays at 9 AM UTC)
+    - cron: '0 9 * * 1'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  validate-schemas:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout TapService
+        uses: actions/checkout@v4
+    
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv sync --extra dev
+      
+      - name: Regenerate MQTT protocol models
+        run: |
+          uv run python scripts/generate_mqtt_models.py
+      
+      - name: Check if models are up-to-date
+        id: check_diff
+        run: |
+          # Strip timestamps from both versions for comparison
+          # This prevents false positives when only generation timestamp changed
+          git show HEAD:tapservice/mqtt_protocol_models.py | \
+            sed -E 's/^(Last generated|#   timestamp): .*/\1: <timestamp>/' > /tmp/old_models.py
+          cat tapservice/mqtt_protocol_models.py | \
+            sed -E 's/^(Last generated|#   timestamp): .*/\1: <timestamp>/' > /tmp/new_models.py
+          
+          if diff -u /tmp/old_models.py /tmp/new_models.py > /tmp/model_diff.txt; then
+            echo "Models are up-to-date ✅"
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+          else
+            echo "Models are outdated ❌"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "::warning::MQTT protocol models are not up-to-date. Run 'uv run python scripts/generate_mqtt_models.py' to regenerate."
+            echo "Diff (excluding timestamps):"
+            cat /tmp/model_diff.txt
+          fi
+      
+      - name: Run schema compliance tests
+        run: |
+          uv run pytest tests/test_schema_compliance.py -v
+      
+      - name: Fail if models need update
+        if: steps.check_diff.outputs.needs_update == 'true'
+        run: |
+          echo "❌ MQTT protocol models are out of sync with mqtt-protocol schemas!"
+          echo ""
+          echo "To fix this, run locally:"
+          echo "  uv run python scripts/generate_mqtt_models.py"
+          echo "  git add tapservice/mqtt_protocol_models.py"
+          echo "  git commit -m 'chore: regenerate MQTT protocol models'"
+          echo ""
+          exit 1
+      
+      - name: Create PR if protocol updated (scheduled runs with changes)
+        if: github.event_name == 'schedule' && steps.check_diff.outputs.needs_update == 'true'
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Create branch and commit changes
+          BRANCH_NAME="automated/update-mqtt-protocol-models"
+          git checkout -b "$BRANCH_NAME"
+          git add tapservice/mqtt_protocol_models.py
+          git commit -m "chore: update MQTT protocol models to latest schema"
+          git push -f origin "$BRANCH_NAME"
+          
+          # Create PR using GitHub CLI
+          gh pr create \
+            --base main \
+            --head "$BRANCH_NAME" \
+            --title "🔄 Update MQTT Protocol Models" \
+            --body "## Automated MQTT Protocol Schema Update
+
+          This PR updates the generated MQTT protocol models to match the latest schemas from the [mqtt-protocol repository](https://github.com/LibreTap/mqtt-protocol).
+
+          ### Changes
+
+          - Regenerated \`tapservice/mqtt_protocol_models.py\` from latest schemas
+          - All schema compliance tests passing ✅
+
+          ### Review Checklist
+
+          - [ ] Review model changes in \`tapservice/mqtt_protocol_models.py\`
+          - [ ] Check if MQTT handlers need updates for new/changed fields
+          - [ ] Verify schema compliance tests pass
+          - [ ] Update integration tests if message structure changed
+
+          ### References
+
+          - [mqtt-protocol schemas](https://github.com/LibreTap/mqtt-protocol/tree/main/schemas)
+          - [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ---
+
+          🤖 This PR was automatically created by the scheduled schema validation workflow." \
+            --label "mqtt-protocol,automated,dependencies" || echo "PR may already exist"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

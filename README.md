@@ -154,6 +154,23 @@ uv run pytest --cov=tapservice --cov-report=html    # With coverage
 
 **Structure**: `main.py` (app) · `routes.py` (endpoints) · `mqtt_client.py` (MQTT connection) · `mqtt_handlers.py` (state updates) · `schemas.py` (models) · `session_manager.py` (state) · `settings.py` (config)
 
+For development workflows, testing, and contributing guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### MQTT Schema Validation
+
+TapService validates all MQTT messages against JSON schemas from the [mqtt-protocol repository](https://github.com/LibreTap/mqtt-protocol). This ensures type safety and catches malformed messages before they affect state.
+
+**Generated Models**: Type-safe Pydantic models are auto-generated from JSON schemas:
+- `tapservice/mqtt_protocol_models.py` - **DO NOT EDIT MANUALLY**
+
+**Validation Points**:
+1. **Incoming events**: `mqtt_client.py` validates all device messages at runtime
+2. **Test coverage**: `tests/test_schema_compliance.py` validates all command/event payloads
+
+**CI/CD**: GitHub Actions automatically validates models are up-to-date and runs weekly checks for mqtt-protocol updates.
+
+For instructions on regenerating models after schema updates, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## MQTT Integration
 
 TapService uses `aiomqtt` to connect to an MQTT broker and communicate with NFC devices according to the [LibreTap MQTT Protocol Specification](https://github.com/LibreTap/mqtt-protocol).
@@ -220,26 +237,23 @@ All MQTT messages use a standard envelope (v1.0):
 }
 ```
 
-See the [MQTT Protocol Specification](mqtt-protocol/MQTT_PROTOCOL_SPEC.md) for complete details on message schemas, QoS levels, error codes, and flow diagrams.
+See the [MQTT Protocol Specification](https://github.com/LibreTap/mqtt-protocol) for complete details on message schemas, QoS levels, error codes, and flow diagrams.
 
 ### Running with MQTT
 
-For local development, you can use Mosquitto:
+For local development, we recommend EMQX (easier setup than Mosquitto):
 
 ```bash
-# Install Mosquitto
-sudo apt install mosquitto mosquitto-clients  # Ubuntu/Debian
-brew install mosquitto                        # macOS
-
-# Start broker
-mosquitto -v
+# Run EMQX with Docker (includes web dashboard at http://localhost:18083)
+docker run -d --name emqx -p 1883:1883 -p 18083:18083 emqx/emqx:latest
 
 # Run TapService (connects automatically on startup)
 uv run uvicorn tapservice.main:app --reload
-
-# Test with mosquitto_pub (simulate device)
-mosquitto_pub -t 'devices/test_reader/status' -m '{"version":"1.0","timestamp":"2025-11-11T12:00:00Z","device_id":"test_reader","event_type":"status_change","request_id":"test","payload":{"status":"online"}}'
 ```
+
+**EMQX Dashboard**: http://localhost:18083 (default credentials: `admin` / `public`)
+
+For detailed MQTT testing and development workflows, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Future
 - Operation timeouts

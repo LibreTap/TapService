@@ -17,8 +17,19 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 from aiomqtt import Client, MqttError
+from pydantic import ValidationError
 
 from .settings import get_settings
+from .mqtt_protocol_models import (
+    MqttMessageEnvelope,
+    StatusChange,
+    ModeChange,
+    TagDetected,
+    SuccessRegisterRead,
+    SuccessAuth,
+    FailedAuth,
+    Error as MqttError_,
+)
 from .mqtt_handlers import (
     on_device_status_change,
     on_device_mode_change,
@@ -177,28 +188,55 @@ class MQTTClient:
             logger.error(f"Failed to decode JSON payload from topic {topic}")
             return
         
-        # Validate envelope (basic validation)
-        if not self._validate_envelope(payload, device_id):
-            logger.warning(f"Invalid message envelope from {device_id}")
+        # Validate envelope using generated Pydantic model
+        try:
+            envelope = MqttMessageEnvelope.model_validate(payload)
+        except ValidationError as e:
+            logger.error(
+                f"Invalid MQTT envelope from {device_id} on topic {topic}: {e}",
+                extra={"device_id": device_id, "validation_errors": e.errors()}
+            )
+            return
+        
+        # Verify device_id matches topic
+        if envelope.device_id != device_id:
+            logger.warning(
+                f"Device ID mismatch: topic has {device_id}, envelope has {envelope.device_id}"
+            )
             return
         
         # Extract common fields
-        request_id = payload.get("request_id")
-        event_payload = payload.get("payload", {})  # Extract nested payload
+        request_id = str(envelope.request_id)
+        event_payload = envelope.payload
         
-        logger.info(f"Received MQTT message on topic: {topic}", extra={"device_id": device_id, "request_id": request_id})
+        logger.info(
+            f"Received MQTT message on topic: {topic}",
+            extra={"device_id": device_id, "request_id": request_id, "event_type": envelope.event_type.value}
+        )
         
-        # Route to appropriate handler
+        # Route to appropriate handler with payload validation
         try:
             if operation == "status":
-                await on_device_status_change(device_id, event_payload.get("status"))
+                # Validate status_change payload
+                try:
+                    status_payload = StatusChange.model_validate(event_payload)
+                    await on_device_status_change(device_id, status_payload.status.value)
+                except ValidationError as e:
+                    logger.error(f"Invalid status_change payload from {device_id}: {e}")
+                    return
             
             elif operation == "mode":
-                await on_device_mode_change(
-                    device_id,
-                    event_payload.get("mode"),
-                    session_id=event_payload.get("session_id")
-                )
+                # Validate mode_change payload
+                try:
+                    mode_payload = ModeChange.model_validate(event_payload)
+                    await on_device_mode_change(
+                        device_id,
+                        mode_payload.mode.value,
+                        session_id=event_payload.get("session_id")
+                    )
+                except ValidationError as e:
+                    logger.error(f"Invalid mode_change payload from {device_id}: {e}")
+                    return
             
             elif operation == "register":
                 action = topic_parts[3] if len(topic_parts) > 3 else None
@@ -226,89 +264,91 @@ class MQTTClient:
             logger.error(f"Error handling {operation} event from {device_id}: {e}", exc_info=True)
     
     async def _handle_register_event(self, device_id: str, action: Optional[str], request_id: str, payload: dict):
-        """Route register operation events to handlers."""
+        """Route register operation events to handlers with payload validation."""
         if action == "success":
-            await on_register_success(device_id, request_id, payload.get("tag_uid", ""))
+            try:
+                success_payload = SuccessRegisterRead.model_validate(payload)
+                await on_register_success(device_id, request_id, success_payload.tag_uid)
+            except ValidationError as e:
+                logger.error(f"Invalid register_success payload from {device_id}: {e}")
         elif action == "error":
-            await on_register_error(
-                device_id,
-                request_id,
-                payload.get("error", ""),
-                payload.get("error_code", "")
-            )
+            try:
+                error_payload = MqttError_.model_validate(payload)
+                await on_register_error(
+                    device_id,
+                    request_id,
+                    error_payload.error,
+                    error_payload.error_code.value
+                )
+            except ValidationError as e:
+                logger.error(f"Invalid register_error payload from {device_id}: {e}")
         else:
             logger.warning(f"Unknown register action: {action}")
     
     async def _handle_auth_event(self, device_id: str, action: Optional[str], request_id: str, payload: dict):
-        """Route auth operation events to handlers."""
+        """Route auth operation events to handlers with payload validation."""
         if action == "tag_detected":
-            await on_auth_tag_detected(device_id, request_id, payload.get("tag_uid", ""))
+            try:
+                tag_payload = TagDetected.model_validate(payload)
+                await on_auth_tag_detected(device_id, request_id, tag_payload.tag_uid)
+            except ValidationError as e:
+                logger.error(f"Invalid auth_tag_detected payload from {device_id}: {e}")
         elif action == "success":
-            await on_auth_success(
-                device_id,
-                request_id,
-                payload.get("tag_uid", ""),
-                payload.get("user_data", {})
-            )
+            try:
+                success_payload = SuccessAuth.model_validate(payload)
+                await on_auth_success(
+                    device_id,
+                    request_id,
+                    success_payload.tag_uid,
+                    success_payload.user_data or {}
+                )
+            except ValidationError as e:
+                logger.error(f"Invalid auth_success payload from {device_id}: {e}")
         elif action == "failed":
-            await on_auth_failed(device_id, request_id, payload.get("reason", ""))
+            try:
+                failed_payload = FailedAuth.model_validate(payload)
+                await on_auth_failed(device_id, request_id, failed_payload.reason)
+            except ValidationError as e:
+                logger.error(f"Invalid auth_failed payload from {device_id}: {e}")
         elif action == "error":
-            await on_auth_error(
-                device_id,
-                request_id,
-                payload.get("error", ""),
-                payload.get("error_code", "")
-            )
+            try:
+                error_payload = MqttError_.model_validate(payload)
+                await on_auth_error(
+                    device_id,
+                    request_id,
+                    error_payload.error,
+                    error_payload.error_code.value
+                )
+            except ValidationError as e:
+                logger.error(f"Invalid auth_error payload from {device_id}: {e}")
         else:
             logger.warning(f"Unknown auth action: {action}")
     
     async def _handle_read_event(self, device_id: str, action: Optional[str], request_id: str, payload: dict):
-        """Route read operation events to handlers."""
+        """Route read operation events to handlers with payload validation."""
         if action == "success":
-            await on_read_success(
-                device_id,
-                request_id,
-                payload.get("tag_uid", ""),
-                payload.get("data", {})
-            )
+            # Read success uses same schema as register success (SuccessRegisterRead)
+            # but for read operations, we expect "data" instead of "blocks_written"
+            # For now, validate basic structure
+            tag_uid = payload.get("tag_uid", "")
+            data = payload.get("data", {})
+            if tag_uid:
+                await on_read_success(device_id, request_id, tag_uid, data)
+            else:
+                logger.error(f"Missing tag_uid in read_success payload from {device_id}")
         elif action == "error":
-            await on_read_error(
-                device_id,
-                request_id,
-                payload.get("error", ""),
-                payload.get("error_code", "")
-            )
+            try:
+                error_payload = MqttError_.model_validate(payload)
+                await on_read_error(
+                    device_id,
+                    request_id,
+                    error_payload.error,
+                    error_payload.error_code.value
+                )
+            except ValidationError as e:
+                logger.error(f"Invalid read_error payload from {device_id}: {e}")
         else:
             logger.warning(f"Unknown read action: {action}")
-    
-    def _validate_envelope(self, payload: dict, expected_device_id: str) -> bool:
-        """
-        Validate message envelope according to protocol spec.
-        
-        Required fields: version, timestamp, device_id, event_type, request_id
-        """
-        required_fields = ["version", "timestamp", "device_id", "event_type"]
-        
-        # Check required fields exist
-        for field in required_fields:
-            if field not in payload:
-                logger.warning(f"Missing required field in envelope: {field}")
-                return False
-        
-        # Validate device_id matches topic
-        if payload["device_id"] != expected_device_id:
-            logger.warning(
-                f"Device ID mismatch: topic has {expected_device_id}, "
-                f"payload has {payload['device_id']}"
-            )
-            return False
-        
-        # Validate version
-        if payload["version"] != "1.0":
-            logger.warning(f"Unsupported protocol version: {payload['version']}")
-            return False
-        
-        return True
     
     async def publish_command(
         self,

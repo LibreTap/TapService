@@ -263,7 +263,6 @@ async def read_tag(request: ReadRequest):
         request_id=request_id,
         payload={
             "timeout_seconds": 30,  # Default timeout
-            "read_blocks": request.read_blocks if hasattr(request, 'read_blocks') else [0]
         }
     )
     

@@ -190,21 +190,10 @@ class TestCommandPayloads:
         """Valid read_start command."""
         payload = {
             "timeout_seconds": 45,
-            "read_blocks": [4, 5, 6]
         }
         
         validated = ReadStart.model_validate(payload)
-        assert len(validated.read_blocks) == 3
-    
-    def test_read_start_empty_blocks(self):
-        """read_start with empty blocks should fail."""
-        payload = {
-            "timeout_seconds": 45,
-            "read_blocks": []  # must have at least 1
-        }
-        
-        with pytest.raises(ValidationError):
-            ReadStart.model_validate(payload)
+        assert validated.timeout_seconds == 45
     
     def test_cancel_valid(self):
         """Valid cancel command (empty payload)."""

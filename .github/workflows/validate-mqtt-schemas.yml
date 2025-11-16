@@ -29,7 +29,7 @@ jobs:
       
       - name: Regenerate MQTT protocol models
         run: |
-          uv run python scripts/generate_mqtt_models.py
+          uv run python scripts/dev/generate_mqtt_models.py
       
       - name: Check if models are up-to-date
         id: check_diff
@@ -47,7 +47,7 @@ jobs:
           else
             echo "Models are outdated ❌"
             echo "needs_update=true" >> $GITHUB_OUTPUT
-            echo "::warning::MQTT protocol models are not up-to-date. Run 'uv run python scripts/generate_mqtt_models.py' to regenerate."
+            echo "::warning::MQTT protocol models are not up-to-date. Run 'uv run python scripts/dev/generate_mqtt_models.py' to regenerate."
             echo "Diff (excluding timestamps):"
             cat /tmp/model_diff.txt
           fi
@@ -62,7 +62,7 @@ jobs:
           echo "❌ MQTT protocol models are out of sync with mqtt-protocol schemas!"
           echo ""
           echo "To fix this, run locally:"
-          echo "  uv run python scripts/generate_mqtt_models.py"
+          echo "  uv run python scripts/dev/generate_mqtt_models.py"
           echo "  git add tapservice/mqtt_protocol_models.py"
           echo "  git commit -m 'chore: regenerate MQTT protocol models'"
           echo ""

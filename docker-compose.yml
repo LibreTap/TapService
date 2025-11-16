@@ -1,0 +1,71 @@
+services:
+  ca-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root  # Need root to write to volume initially
+    volumes:
+      - ca-data:/etc/libretap/ca
+      - broker-certs:/mosquitto/certs
+      - service-certs:/etc/libretap/service
+    entrypoint: ["/bin/sh", "/app/scripts/init/init_certificates.sh"]
+    
+  inventory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:80"
+    environment:
+      - TAPSERVICE_ENVIRONMENT=production
+      - TAPSERVICE_MQTT_HOST=mqtt-broker  # Internal Docker network
+      - TAPSERVICE_MQTT_EXTERNAL_HOST=mqtt.example.com  # Change to your public IP/domain
+      - TAPSERVICE_MQTT_PORT=1883
+      - TAPSERVICE_MQTT_TLS_PORT=8883
+      - TAPSERVICE_MQTT_USE_TLS=true  # Use mTLS for service-to-broker connection
+      - TAPSERVICE_MQTT_CLIENT_CERT=/etc/libretap/service/service.crt
+      - TAPSERVICE_MQTT_CLIENT_KEY=/etc/libretap/service/service.key
+      # Optional: Username/password for debugging (if not using mTLS)
+      # - TAPSERVICE_MQTT_USERNAME=tapservice
+      # - TAPSERVICE_MQTT_PASSWORD=changeme
+      - TAPSERVICE_CA_CERT_PATH=/etc/libretap/ca/ca.crt
+      - TAPSERVICE_CA_KEY_PATH=/etc/libretap/ca/ca.key
+    volumes:
+      - ca-data:/etc/libretap/ca
+      - service-certs:/etc/libretap/service:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      ca-init:
+        condition: service_completed_successfully
+      mqtt-broker:
+        condition: service_started
+        
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"   # Standard MQTT (internal service connections)
+      - "8883:8883"   # MQTT over TLS (device mTLS connections)
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./config/mosquitto_passwd:/mosquitto/config/passwd:ro
+      - ca-data:/etc/libretap/ca:ro
+      - broker-certs:/mosquitto/certs:ro
+    restart: unless-stopped
+    depends_on:
+      ca-init:
+        condition: service_completed_successfully
+
+
+volumes:
+  ca-data:
+  broker-certs:
+  service-certs:
+    
+
+  

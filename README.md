@@ -1,5 +1,7 @@
 # TapService
 
+[![Tests](https://github.com/LibreTap/TapService/actions/workflows/tests.yml/badge.svg)](https://github.com/LibreTap/TapService/actions/workflows/tests.yml)
+
 FastAPI gateway exposing NFC reader operations via HTTP commands with real-time WebSocket events.
 
 ## Purpose
@@ -152,9 +154,21 @@ uv run pytest                                        # Run tests
 uv run pytest --cov=tapservice --cov-report=html    # With coverage
 ```
 
-**Structure**: `main.py` (app) · `routes.py` (endpoints) · `mqtt_client.py` (MQTT connection) · `mqtt_handlers.py` (state updates) · `schemas.py` (models) · `session_manager.py` (state) · `settings.py` (config)
+### E2E mTLS Integration Tests
 
-For development workflows, testing, and contributing guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
+To run end-to-end tests that validate provisioned certificates can actually connect to the MQTT broker:
+
+```bash
+# Setup (copies CA certs from Docker)
+./tests/setup_integration.sh
+
+# Run E2E tests
+TAPSERVICE_TEST_CA_DIR=./test_ca pytest tests/test_provisioning.py::TestMTLSBrokerConnection -v
+```
+
+See [tests/README_INTEGRATION_TESTS.md](tests/README_INTEGRATION_TESTS.md) for details.
+
+**CI/CD**: GitHub Actions runs both unit tests and E2E mTLS tests automatically on every push.
 
 ### MQTT Schema Validation
 
@@ -177,22 +191,84 @@ TapService uses `aiomqtt` to connect to an MQTT broker and communicate with NFC 
 
 ### Configuration
 
-Set environment variables to configure MQTT connection:
+The service connects to Mosquitto broker with mTLS enabled for device authentication.
 
+**Environment Variables**:
 ```bash
-export TAPSERVICE_MQTT_HOST=localhost      # MQTT broker hostname
-export TAPSERVICE_MQTT_PORT=1883           # MQTT broker port
-export TAPSERVICE_MQTT_USERNAME=tapservice # Optional: MQTT username
-export TAPSERVICE_MQTT_PASSWORD=secret     # Optional: MQTT password
+# Internal service-to-broker connection (standard MQTT)
+export TAPSERVICE_MQTT_HOST=localhost          # Internal broker hostname
+export TAPSERVICE_MQTT_PORT=1883              # Standard MQTT port
+export TAPSERVICE_MQTT_USERNAME=tapservice    # Service username
+export TAPSERVICE_MQTT_PASSWORD=secret        # Service password
+export TAPSERVICE_MQTT_USE_TLS=false          # Optional: Enable TLS for service connection
+
+# Device-to-broker connection (mTLS required)
+export TAPSERVICE_MQTT_EXTERNAL_HOST=192.168.1.100  # Public IP/domain for devices
+export TAPSERVICE_MQTT_TLS_PORT=8883          # TLS port for device mTLS
+
+# Certificate paths
+export TAPSERVICE_CA_CERT_PATH=/etc/libretap/ca/ca.crt
+export TAPSERVICE_CA_KEY_PATH=/etc/libretap/ca/ca.key
 ```
 
 Or create a `.env` file (automatically loaded by pydantic-settings):
 ```
-TAPSERVICE_MQTT_HOST=mqtt.example.com
-TAPSERVICE_MQTT_PORT=8883
+TAPSERVICE_MQTT_HOST=mqtt-broker
+TAPSERVICE_MQTT_EXTERNAL_HOST=mqtt.example.com
+TAPSERVICE_MQTT_PORT=1883
+TAPSERVICE_MQTT_TLS_PORT=8883
 TAPSERVICE_MQTT_USERNAME=tapservice
 TAPSERVICE_MQTT_PASSWORD=your_password
 ```
+
+### Docker Deployment with mTLS
+
+The docker-compose setup automatically configures Mosquitto with mTLS for both service and device connections:
+
+**Quick Start**:
+```bash
+docker compose up -d
+```
+
+That's it! Certificates are automatically generated on first startup.
+
+**What happens**:
+- `ca-init`: Generates CA certificate, broker TLS certificate, and service client certificate
+- `mqtt-broker`: Starts Mosquitto with mTLS on both ports:
+  - Port 1883: Service connection (mTLS with service client certificate)
+  - Port 8883: Device connections (mTLS with device client certificates)
+- `inventory`: TapService connects using its client certificate and provisions device certificates
+
+**Optional: Username/Password for Debugging**
+
+If you need to use username/password authentication instead of mTLS for debugging:
+
+1. **Generate password**:
+   ```bash
+   docker compose up -d mqtt-broker
+   docker compose exec mqtt-broker mosquitto_passwd -c /mosquitto/config/passwd tapservice
+   ```
+
+2. **Update config/mosquitto.conf** to allow password auth on port 1883:
+   ```conf
+   listener 1883
+   allow_anonymous false
+   password_file /mosquitto/config/passwd
+   # Comment out: require_certificate true
+   ```
+
+3. **Update docker-compose.yml** environment:
+   ```yaml
+   - TAPSERVICE_MQTT_USE_TLS=false
+   - TAPSERVICE_MQTT_USERNAME=tapservice
+   - TAPSERVICE_MQTT_PASSWORD=your_password
+   # Comment out: MQTT_CLIENT_CERT and MQTT_CLIENT_KEY
+   ```
+
+4. **Restart services**:
+   ```bash
+   docker compose restart mqtt-broker inventory
+   ```
 
 ### How It Works
 

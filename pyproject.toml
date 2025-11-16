@@ -5,10 +5,11 @@ description = "FastAPI gateway exposing NFC reader operations via HTTP commands 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.121.1",
+    "fastapi[standard]>=0.121.1",
     "websockets>=15.0.1",
     "pydantic-settings>=2.5.2",
     "aiomqtt>=2.4.0",
+    "cryptography>=46.0.3",
 ]
 
 [project.optional-dependencies]
@@ -18,6 +19,7 @@ dev = [
     "pytest>=9.0.0",
     "uvicorn>=0.38.0",
     "datamodel-code-generator>=0.35.0",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.pytest.ini_options]

@@ -7,7 +7,8 @@ on:
   pull_request:
 
 jobs:
-  tests:
+  unit-tests:
+    name: Unit & Integration Tests (EMQX)
     runs-on: ubuntu-latest
     services:
       emqx:
@@ -29,3 +30,54 @@ jobs:
         run: uv sync --extra dev --frozen
       - name: Run pytest
         run: uv run pytest
+
+  e2e-mtls-tests:
+    name: E2E mTLS Provisioning Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: astral-sh/setup-uv@v2
+        with:
+          python-version: "3.12"
+      
+      - name: Sync dependencies
+        run: uv sync --extra dev --frozen
+      
+      - name: Start Docker services
+        run: docker compose up -d
+      
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for services to be ready..."
+          # Wait for ca-init to complete (creates certificates)
+          timeout 60 bash -c 'until docker compose ps -a | grep ca-init | grep -q "Exited"; do echo "Waiting for ca-init..."; sleep 2; done'
+          # Give services a moment to settle
+          sleep 10
+          echo "Service status:"
+          docker compose ps
+      
+      - name: Copy CA certificates from container
+        run: |
+          docker compose cp inventory:/etc/libretap/ca ./test_ca
+          echo "Copied certificates:"
+          ls -la ./test_ca/
+          openssl x509 -in ./test_ca/ca.crt -noout -subject -dates
+      
+      - name: Run mTLS integration tests
+        env:
+          TAPSERVICE_TEST_CA_DIR: ./test_ca
+        run: |
+          uv run pytest tests/test_provisioning.py::TestMTLSBrokerConnection -v
+      
+      - name: Show broker logs on failure
+        if: failure()
+        run: |
+          echo "=== MQTT Broker Logs ==="
+          docker compose logs mqtt-broker
+          echo "=== TapService Logs ==="
+          docker compose logs inventory
+      
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

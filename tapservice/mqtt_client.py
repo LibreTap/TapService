@@ -12,9 +12,11 @@ Based on MQTT_PROTOCOL_SPEC.md from mqtt-protocol directory.
 import asyncio
 import json
 import logging
+import ssl
 from datetime import datetime, UTC
 from typing import Optional
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from aiomqtt import Client, MqttError
 from pydantic import ValidationError
@@ -69,18 +71,47 @@ class MQTTClient:
             
             logger.info(f"Connecting to MQTT broker at {hostname}:{port}")
             
+            # TLS/SSL context setup (optional, for secure internal connections)
+            tls_context = None
+            if self.settings.mqtt_use_tls:
+                tls_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                if Path(self.settings.ca_cert_path).exists():
+                    tls_context.load_verify_locations(self.settings.ca_cert_path)
+                    logger.info(f"Using TLS with CA certificate: {self.settings.ca_cert_path}")
+                    
+                    # Load client certificate for mTLS if provided
+                    if self.settings.mqtt_client_cert and self.settings.mqtt_client_key:
+                        if Path(self.settings.mqtt_client_cert).exists() and Path(self.settings.mqtt_client_key).exists():
+                            tls_context.load_cert_chain(
+                                certfile=self.settings.mqtt_client_cert,
+                                keyfile=self.settings.mqtt_client_key
+                            )
+                            logger.info(f"Using client certificate for mTLS: {self.settings.mqtt_client_cert}")
+                        else:
+                            logger.warning(f"Client certificate paths configured but files not found")
+                else:
+                    # For self-signed certs in development
+                    tls_context.check_hostname = False
+                    tls_context.verify_mode = ssl.CERT_NONE
+                    logger.warning("TLS enabled but CA cert not found - using insecure mode")
+            
             # Create client with authentication if provided
+            # Prefer mTLS (client cert), fallback to username/password
             if self.settings.mqtt_username and self.settings.mqtt_password:
+                logger.info("Using username/password authentication")
                 self.client = Client(
                     hostname=hostname,
                     port=port,
                     username=self.settings.mqtt_username,
                     password=self.settings.mqtt_password,
+                    tls_context=tls_context,
                 )
             else:
+                logger.info("Using mTLS authentication (client certificate)")
                 self.client = Client(
                     hostname=hostname,
                     port=port,
+                    tls_context=tls_context,
                 )
             
             # Connect to broker

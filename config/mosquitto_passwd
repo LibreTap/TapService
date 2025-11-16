@@ -1,0 +1,8 @@
+# Default password file for Mosquitto
+# Format: username:password_hash
+# 
+# Generate password hash with: mosquitto_passwd -c passwd <username>
+# For now, using simple auth for internal service connection
+# 
+# This is a placeholder - will be generated properly in production
+

@@ -268,3 +268,66 @@ class NFCError(BaseModel):
     tag_id: Optional[str] = Field(None, description="Tag ID if available")
     retry_possible: bool = Field(True, description="Whether the operation can be retried")
 
+
+# ============================================================================
+# DEVICE PROVISIONING SCHEMAS (CSR-based certificate issuance)
+# ============================================================================
+
+class EnrollmentTokenRequest(BaseModel):
+    """Request to generate enrollment token for device provisioning."""
+    expires_minutes: int = Field(default=15, ge=1, le=1440, description="Token validity in minutes (max 24h)")
+    max_uses: int = Field(default=1, ge=1, le=100, description="Maximum number of times token can be used")
+    description: Optional[str] = Field(None, description="Optional description for tracking")
+
+
+class EnrollmentTokenResponse(BaseModel):
+    """Response containing enrollment token."""
+    token: str = Field(..., description="Enrollment token for device provisioning")
+    expires_at: str = Field(..., description="ISO 8601 timestamp when token expires")
+    max_uses: int = Field(..., description="Maximum allowed uses")
+    qr_code_data: str = Field(..., description="Data for QR code generation")
+
+
+class ProvisionDeviceRequest(BaseModel):
+    """Request to provision device with certificate (CSR-based)."""
+    device_id: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9-_]+$', 
+                          description="Unique device identifier")
+    csr_pem: str = Field(..., description="PEM-encoded Certificate Signing Request")
+    hardware_info: Optional[dict] = Field(None, description="Optional hardware metadata (MAC, chip ID, etc.)")
+
+
+class ProvisionDeviceResponse(BaseModel):
+    """Response after successful device provisioning."""
+    device_id: str = Field(..., description="Device identifier")
+    certificate: str = Field(..., description="PEM-encoded signed device certificate")
+    ca_certificate: str = Field(..., description="PEM-encoded CA certificate for verification")
+    mqtt_host: str = Field(..., description="MQTT broker hostname")
+    mqtt_port: int = Field(..., description="MQTT broker TLS port")
+    expires_at: str = Field(..., description="Certificate expiration timestamp (ISO 8601)")
+    fingerprint: str = Field(..., description="Certificate SHA256 fingerprint")
+
+
+class RevokeDeviceRequest(BaseModel):
+    """Request to revoke device certificate."""
+    device_id: str = Field(..., description="Device identifier to revoke")
+    reason: Optional[str] = Field(None, description="Reason for revocation")
+
+
+class RevokeDeviceResponse(BaseModel):
+    """Response after certificate revocation."""
+    device_id: str
+    serial_number: int = Field(..., description="Certificate serial number")
+    status: str = Field(default="revoked")
+    message: str = Field(default="Device certificate revoked successfully")
+
+
+class DeviceCertificateInfo(BaseModel):
+    """Information about a device certificate."""
+    device_id: str
+    serial_number: int
+    fingerprint: str
+    issued_at: str
+    expires_at: str
+    revoked: bool = Field(default=False)
+    subject: str
+

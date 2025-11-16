@@ -6,6 +6,7 @@ from fastapi.routing import APIRoute
 import logging
 
 from .routes import router
+from .provisioning import router as provisioning_router
 from .mqtt_client import get_mqtt_client
 
 logger = logging.getLogger("tapservice")
@@ -52,3 +53,10 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(provisioning_router)
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration."""
+    return {"status": "healthy"}

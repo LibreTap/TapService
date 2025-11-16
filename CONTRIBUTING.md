@@ -38,7 +38,7 @@ TapService uses auto-generated Pydantic models from the [mqtt-protocol repositor
 
 ```bash
 # Download latest schemas from GitHub and regenerate models
-uv run python scripts/generate_mqtt_models.py
+uv run python scripts/dev/generate_mqtt_models.py
 
 # Run tests to verify compatibility
 uv run pytest tests/test_schema_compliance.py -v
